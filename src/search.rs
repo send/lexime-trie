@@ -30,6 +30,7 @@ pub struct ProbeResult {
 impl<L: Label> DoubleArray<L> {
     /// Traverses the trie from the root following the given key labels.
     /// Returns the node index after consuming all labels, or None if traversal fails.
+    #[inline]
     fn traverse(&self, key: &[L]) -> Option<u32> {
         let mut node_idx: u32 = 0; // start at root
         for &label in key {
@@ -50,20 +51,22 @@ impl<L: Label> DoubleArray<L> {
     }
 
     /// Exact match search. Returns the value_id if the key exists.
+    #[inline]
     pub fn exact_match(&self, key: &[L]) -> Option<u32> {
         let node_idx = self.traverse(key)?;
+        let node = self.nodes[node_idx as usize];
 
         // Fast path: check has_leaf flag before probing terminal child
-        if !self.nodes[node_idx as usize].has_leaf() {
+        if !node.has_leaf() {
             return None;
         }
 
         // Check terminal child: base XOR terminal_code where terminal_code = 0
-        let terminal_idx = self.nodes[node_idx as usize].base();
+        let terminal_idx = node.base();
         if terminal_idx as usize >= self.nodes.len() {
             return None;
         }
-        let terminal = &self.nodes[terminal_idx as usize];
+        let terminal = self.nodes[terminal_idx as usize];
         if terminal.check() == node_idx && terminal.is_leaf() {
             Some(terminal.value_id())
         } else {
@@ -99,6 +102,7 @@ impl<L: Label> DoubleArray<L> {
 
     /// Finds the first child of `node_idx`.
     /// Checks the terminal child (code 0) first, then scans non-terminal codes.
+    #[inline]
     fn first_child(&self, node_idx: u32) -> Option<u32> {
         let base = self.nodes[node_idx as usize].base();
         // Terminal child is at base XOR 0 = base (skip self-reference for root with base=0)
@@ -126,6 +130,7 @@ impl<L: Label> DoubleArray<L> {
     /// - `Prefix`: key is a prefix of other keys but not a key itself
     /// - `Exact`: key exists but is not a prefix of other keys
     /// - `ExactAndPrefix`: key exists and is also a prefix of other keys
+    #[inline]
     pub fn probe(&self, key: &[L]) -> ProbeResult {
         let node_idx = match self.traverse(key) {
             Some(idx) => idx,
@@ -137,31 +142,28 @@ impl<L: Label> DoubleArray<L> {
             }
         };
 
-        let node = &self.nodes[node_idx as usize];
-        let base = node.base();
+        let base = self.nodes[node_idx as usize].base();
 
         // Check terminal child: base XOR 0 = base
         let terminal_idx = base;
-        if (terminal_idx as usize) < self.nodes.len()
-            && self.nodes[terminal_idx as usize].check() == node_idx
-            && self.nodes[terminal_idx as usize].is_leaf()
-        {
-            // Terminal child exists — key is in the trie
-            let value_id = self.nodes[terminal_idx as usize].value_id();
-            // has_children = terminal has siblings (other children of this node)
-            let has_children = self.siblings[terminal_idx as usize] != 0;
-            ProbeResult {
-                value: Some(value_id),
-                has_children,
+        if (terminal_idx as usize) < self.nodes.len() {
+            let terminal = self.nodes[terminal_idx as usize];
+            if terminal.check() == node_idx && terminal.is_leaf() {
+                // Terminal child exists — key is in the trie
+                let has_children = self.siblings[terminal_idx as usize] != 0;
+                return ProbeResult {
+                    value: Some(terminal.value_id()),
+                    has_children,
+                };
             }
-        } else {
-            // No terminal child — key is not in the trie.
-            // Check if the node actually has children (could be root of empty trie).
-            let has_children = self.first_child(node_idx).is_some();
-            ProbeResult {
-                value: None,
-                has_children,
-            }
+        }
+
+        // No terminal child — key is not in the trie.
+        // Check if the node actually has children (could be root of empty trie).
+        let has_children = self.first_child(node_idx).is_some();
+        ProbeResult {
+            value: None,
+            has_children,
         }
     }
 }
@@ -176,6 +178,7 @@ struct CommonPrefixIter<'a, L: Label> {
 
 impl<L: Label> CommonPrefixIter<'_, L> {
     /// Checks if the current node has a terminal child and returns the match.
+    #[inline]
     fn check_terminal(&self) -> Option<PrefixMatch> {
         let node = &self.da.nodes[self.node_idx as usize];
         if !node.has_leaf() {
@@ -197,6 +200,7 @@ impl<L: Label> CommonPrefixIter<'_, L> {
     }
 
     /// Tries to advance to the next query position. Returns false if unable.
+    #[inline]
     fn try_advance(&mut self) -> bool {
         if self.pos >= self.query.len() {
             return false;
