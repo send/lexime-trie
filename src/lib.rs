@@ -12,9 +12,9 @@ pub use label::Label;
 pub use node::Node;
 pub use search::{PrefixMatch, ProbeResult, SearchMatch};
 
-/// Errors that can occur during lemma operations.
+/// Errors that can occur during trie operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LemmaError {
+pub enum TrieError {
     /// The binary data has an invalid magic number.
     InvalidMagic,
     /// The binary data has an unsupported version.
@@ -23,17 +23,17 @@ pub enum LemmaError {
     TruncatedData,
 }
 
-impl std::fmt::Display for LemmaError {
+impl std::fmt::Display for TrieError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LemmaError::InvalidMagic => write!(f, "invalid magic number"),
-            LemmaError::InvalidVersion => write!(f, "unsupported version"),
-            LemmaError::TruncatedData => write!(f, "truncated or corrupted data"),
+            TrieError::InvalidMagic => write!(f, "invalid magic number"),
+            TrieError::InvalidVersion => write!(f, "unsupported version"),
+            TrieError::TruncatedData => write!(f, "truncated or corrupted data"),
         }
     }
 }
 
-impl std::error::Error for LemmaError {}
+impl std::error::Error for TrieError {}
 
 /// A double-array trie supporting exact match, common prefix search,
 /// predictive search, and probe operations.

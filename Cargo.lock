@@ -226,7 +226,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lemma"
+name = "lexime-trie"
 version = "0.1.0"
 dependencies = [
  "criterion",

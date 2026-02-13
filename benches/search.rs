@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use lemma::DoubleArray;
+use lexime_trie::DoubleArray;
 
 // ── Hand-rolled LCG (no external deps) ──────────────────────────────────────
 

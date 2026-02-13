@@ -1,6 +1,6 @@
-use crate::{CodeMapper, DoubleArray, Label, LemmaError, Node};
+use crate::{CodeMapper, DoubleArray, Label, Node, TrieError};
 
-const MAGIC: &[u8; 4] = b"LMMA";
+const MAGIC: &[u8; 4] = b"LXTR";
 const VERSION: u8 = 1;
 const HEADER_SIZE: usize = 4 + 1 + 4 + 4 + 4; // magic + version + 3 lengths = 17
 
@@ -10,7 +10,7 @@ impl<L: Label> DoubleArray<L> {
     /// Format:
     /// ```text
     /// Offset  Size  Content
-    /// 0       4     Magic: "LMMA"
+    /// 0       4     Magic: "LXTR"
     /// 4       1     Version: 1
     /// 5       4     nodes_len (u32 LE)
     /// 9       4     siblings_len (u32 LE)
@@ -48,19 +48,19 @@ impl<L: Label> DoubleArray<L> {
     }
 
     /// Deserializes a double-array trie from a byte slice.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, LemmaError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, TrieError> {
         if bytes.len() < HEADER_SIZE {
-            return Err(LemmaError::TruncatedData);
+            return Err(TrieError::TruncatedData);
         }
 
         // Check magic
         if &bytes[0..4] != MAGIC {
-            return Err(LemmaError::InvalidMagic);
+            return Err(TrieError::InvalidMagic);
         }
 
         // Check version
         if bytes[4] != VERSION {
-            return Err(LemmaError::InvalidVersion);
+            return Err(TrieError::InvalidVersion);
         }
 
         let nodes_len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
@@ -69,24 +69,24 @@ impl<L: Label> DoubleArray<L> {
 
         let expected_size = HEADER_SIZE + nodes_len + siblings_len + code_map_len;
         if bytes.len() < expected_size {
-            return Err(LemmaError::TruncatedData);
+            return Err(TrieError::TruncatedData);
         }
 
         let mut offset = HEADER_SIZE;
 
         // Deserialize nodes
         let nodes = deserialize_nodes(&bytes[offset..offset + nodes_len])
-            .ok_or(LemmaError::TruncatedData)?;
+            .ok_or(TrieError::TruncatedData)?;
         offset += nodes_len;
 
         // Deserialize siblings
         let siblings = deserialize_u32_slice(&bytes[offset..offset + siblings_len])
-            .ok_or(LemmaError::TruncatedData)?;
+            .ok_or(TrieError::TruncatedData)?;
         offset += siblings_len;
 
         // Deserialize code_map
         let (code_map, _consumed) = CodeMapper::from_bytes(&bytes[offset..offset + code_map_len])
-            .ok_or(LemmaError::TruncatedData)?;
+            .ok_or(TrieError::TruncatedData)?;
 
         Ok(Self::new(nodes, siblings, code_map))
     }
@@ -193,7 +193,7 @@ mod tests {
         bytes[0] = b'X';
         assert!(matches!(
             DoubleArray::<u8>::from_bytes(&bytes),
-            Err(LemmaError::InvalidMagic)
+            Err(TrieError::InvalidMagic)
         ));
     }
 
@@ -203,7 +203,7 @@ mod tests {
         bytes[4] = 99;
         assert!(matches!(
             DoubleArray::<u8>::from_bytes(&bytes),
-            Err(LemmaError::InvalidVersion)
+            Err(TrieError::InvalidVersion)
         ));
     }
 
@@ -212,7 +212,7 @@ mod tests {
         let bytes = build_empty_u8().as_bytes();
         assert!(matches!(
             DoubleArray::<u8>::from_bytes(&bytes[..HEADER_SIZE]),
-            Err(LemmaError::TruncatedData)
+            Err(TrieError::TruncatedData)
         ));
     }
 
@@ -220,7 +220,7 @@ mod tests {
     fn truncated_header() {
         assert!(matches!(
             DoubleArray::<u8>::from_bytes(&[0; 4]),
-            Err(LemmaError::TruncatedData)
+            Err(TrieError::TruncatedData)
         ));
     }
 
