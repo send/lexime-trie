@@ -1,0 +1,19 @@
+[tasks.build]
+description = "Build the project"
+run = "cargo build"
+
+[tasks.test]
+description = "Run all tests"
+run = "cargo test"
+
+[tasks.check]
+description = "Run cargo check and clippy"
+run = ["cargo check", "cargo clippy -- -D warnings"]
+
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt"
+
+[tasks."fmt:check"]
+description = "Check formatting"
+run = "cargo fmt --check"
