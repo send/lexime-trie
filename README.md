@@ -69,7 +69,7 @@ assert!(da.exact_match(&"あい".chars().collect::<Vec<_>>()).is_some());
 
 ## Design
 
-See [SPEC.md](SPEC.md) for the full design document.
+See [SPEC.md](https://github.com/send/lexime-trie/blob/main/SPEC.md) for the full design document.
 
 ## License
 
