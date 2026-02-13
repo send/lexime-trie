@@ -3,6 +3,7 @@
 /// Labels must be copyable, orderable, and convertible to/from `u32`.
 /// `ALPHABET_SIZE` defines the theoretical maximum number of distinct labels.
 pub trait Label: Copy + Ord + Into<u32> + TryFrom<u32> {
+    /// The theoretical maximum number of distinct label values.
     const ALPHABET_SIZE: u32;
 }
 

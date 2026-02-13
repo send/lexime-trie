@@ -2,6 +2,14 @@
 name = "lexime-trie"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
+description = "A char-wise Double-Array Trie with zero dependencies"
+license = "MIT"
+repository = "https://github.com/send/lexime-trie"
+keywords = ["trie", "double-array", "japanese", "ime"]
+categories = ["data-structures", "text-processing"]
+readme = "README.md"
+exclude = [".github/", "mise.toml", "SPEC.md", "SPEC.ja.md"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

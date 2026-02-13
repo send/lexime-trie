@@ -1,3 +1,21 @@
+//! A char-wise Double-Array Trie with zero dependencies.
+//!
+//! This crate provides [`DoubleArray`], a compact trie implementation based on the
+//! double-array structure. It supports exact match, common prefix search, predictive
+//! search, and probe operations over sequences of [`Label`] elements (`u8` or `char`).
+//!
+//! # Quick start
+//!
+//! ```
+//! use lexime_trie::DoubleArray;
+//!
+//! let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
+//! let da = DoubleArray::<u8>::build(&keys);
+//! assert_eq!(da.exact_match(b"abc"), Some(2));
+//! ```
+
+#![warn(missing_docs)]
+
 mod build;
 mod code_map;
 mod label;
