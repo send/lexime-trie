@@ -21,3 +21,11 @@ run = "cargo fmt --check"
 [tasks.bench]
 description = "Run benchmarks"
 run = "cargo bench"
+
+[tasks."bench:save"]
+description = "Save current benchmark results as baseline"
+run = "cargo bench --bench search -- --save-baseline main"
+
+[tasks."bench:compare"]
+description = "Run benchmarks and compare against saved baseline"
+run = "cargo bench --bench search -- --baseline main"
