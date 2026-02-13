@@ -72,6 +72,24 @@ impl Node {
     pub fn set_has_leaf(&mut self) {
         self.check |= HAS_LEAF;
     }
+
+    /// Returns the raw base field including flags (for serialization).
+    #[inline]
+    pub fn raw_base(&self) -> u32 {
+        self.base
+    }
+
+    /// Returns the raw check field including flags (for serialization).
+    #[inline]
+    pub fn raw_check(&self) -> u32 {
+        self.check
+    }
+
+    /// Constructs a Node from raw base and check values (for deserialization).
+    #[inline]
+    pub fn from_raw(base: u32, check: u32) -> Self {
+        Self { base, check }
+    }
 }
 
 #[cfg(test)]

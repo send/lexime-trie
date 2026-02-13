@@ -102,9 +102,10 @@ impl<L: Label> DoubleArray<L> {
     /// Returns the index of the first valid child, or None.
     fn first_child(&self, node_idx: u32) -> Option<u32> {
         let base = self.nodes[node_idx as usize].base();
-        // Terminal child is at base XOR 0 = base
+        // Terminal child is at base XOR 0 = base (skip self-reference for root with base=0)
         let terminal_idx = base;
-        if (terminal_idx as usize) < self.nodes.len()
+        if terminal_idx != node_idx
+            && (terminal_idx as usize) < self.nodes.len()
             && self.nodes[terminal_idx as usize].check() == node_idx
         {
             return Some(terminal_idx);
@@ -164,11 +165,12 @@ impl<L: Label> DoubleArray<L> {
                 has_children,
             }
         } else {
-            // No terminal child — key is not in the trie, but node exists
-            // so it must have non-terminal children (it's a prefix)
+            // No terminal child — key is not in the trie.
+            // Check if the node actually has children (could be root of empty trie).
+            let has_children = self.first_child(node_idx).is_some();
             ProbeResult {
                 value: None,
-                has_children: true,
+                has_children,
             }
         }
     }
@@ -673,6 +675,19 @@ mod tests {
     fn probe_empty_trie() {
         let da = build_u8(&[]);
         let result = da.probe(b"abc");
+        assert_eq!(
+            result,
+            ProbeResult {
+                value: None,
+                has_children: false,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_empty_key_on_empty_trie() {
+        let da = build_u8(&[]);
+        let result = da.probe(b"");
         assert_eq!(
             result,
             ProbeResult {

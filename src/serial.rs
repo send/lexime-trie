@@ -95,12 +95,8 @@ impl<L: Label> DoubleArray<L> {
 fn serialize_nodes(nodes: &[Node]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(nodes.len() * 8);
     for node in nodes {
-        // Access raw u32 values via the public accessors, preserving flags
-        // We need to serialize the raw base and check fields including flags.
-        // Since Node is #[repr(C)] with two u32 fields, we can safely transmute.
-        let raw: &[u32; 2] = unsafe { &*(node as *const Node as *const [u32; 2]) };
-        buf.extend_from_slice(&raw[0].to_le_bytes());
-        buf.extend_from_slice(&raw[1].to_le_bytes());
+        buf.extend_from_slice(&node.raw_base().to_le_bytes());
+        buf.extend_from_slice(&node.raw_check().to_le_bytes());
     }
     buf
 }
@@ -115,12 +111,7 @@ fn deserialize_nodes(bytes: &[u8]) -> Option<Vec<Node>> {
         let offset = i * 8;
         let base = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
         let check = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
-        // Reconstruct Node from raw u32 values preserving flags
-        let mut raw = [0u32; 2];
-        raw[0] = base;
-        raw[1] = check;
-        let node: Node = unsafe { std::mem::transmute(raw) };
-        nodes.push(node);
+        nodes.push(Node::from_raw(base, check));
     }
     Some(nodes)
 }
