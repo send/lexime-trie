@@ -72,6 +72,11 @@ impl CodeMapper {
     /// Returns the label (as u32) for a code. Code 0 is the terminal symbol.
     #[inline]
     pub fn reverse(&self, code: u32) -> u32 {
+        debug_assert!(
+            (code as usize) < self.reverse_table.len(),
+            "code {code} out of bounds (alphabet_size {})",
+            self.alphabet_size
+        );
         self.reverse_table[code as usize]
     }
 
