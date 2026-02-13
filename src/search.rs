@@ -87,11 +87,45 @@ impl<L: Label> DoubleArray<L> {
     }
 
     /// Predictive search. Returns an iterator over all keys that start with `prefix`.
+    ///
+    /// Uses sibling chain DFS to enumerate all keys sharing the given prefix.
+    /// Keys are reconstructed using `CodeMapper::reverse`.
     pub fn predictive_search<'a>(
         &'a self,
-        _prefix: &'a [L],
+        prefix: &'a [L],
     ) -> impl Iterator<Item = SearchMatch<L>> + 'a {
-        std::iter::empty()
+        PredictiveIter::new(self, prefix)
+    }
+
+    /// Finds the first child of `node_idx` using the sibling chain.
+    /// The first child is at `base(node) XOR 0` (terminal), then follows the sibling chain.
+    /// Returns the index of the first valid child, or None.
+    fn first_child(&self, node_idx: u32) -> Option<u32> {
+        let base = self.nodes[node_idx as usize].base();
+        // Terminal child is at base XOR 0 = base
+        let terminal_idx = base;
+        if (terminal_idx as usize) < self.nodes.len()
+            && self.nodes[terminal_idx as usize].check() == node_idx
+        {
+            return Some(terminal_idx);
+        }
+        // If no terminal child, the first non-terminal child must be found.
+        // But the sibling chain starts from the first child placed during build.
+        // We need to scan codes to find any child.
+        // Actually, for nodes with has_leaf, the terminal is the first child.
+        // For nodes without has_leaf, we need another way to find the first child.
+        // Since all internal nodes must have at least one child, and the build places
+        // children starting from code 0, we can check if terminal exists (above),
+        // and if not, we need to search. But the sibling chain only connects siblings
+        // once we have a starting child. For nodes without terminal, we know they have
+        // children (otherwise they wouldn't exist), so we scan from code 1.
+        for code in 1..self.code_map.alphabet_size() {
+            let idx = base ^ code;
+            if (idx as usize) < self.nodes.len() && self.nodes[idx as usize].check() == node_idx {
+                return Some(idx);
+            }
+        }
+        None
     }
 
     /// Probe a key. Returns whether the key exists and whether it has children.
@@ -179,6 +213,99 @@ impl<'a, L: Label> Iterator for CommonPrefixIter<'a, L> {
             self.node_idx = next_idx;
             self.pos += 1;
         }
+    }
+}
+
+struct PredictiveIter<'a, L: Label> {
+    da: &'a DoubleArray<L>,
+    // Stack of (node_index, key_so_far) for DFS
+    stack: Vec<(u32, Vec<L>)>,
+}
+
+impl<'a, L: Label> PredictiveIter<'a, L> {
+    fn new(da: &'a DoubleArray<L>, prefix: &[L]) -> Self {
+        let mut iter = PredictiveIter {
+            da,
+            stack: Vec::new(),
+        };
+
+        // Traverse prefix to find starting node
+        if let Some(start_node) = da.traverse(prefix) {
+            let prefix_labels: Vec<L> = prefix.to_vec();
+            iter.stack.push((start_node, prefix_labels));
+        }
+
+        iter
+    }
+}
+
+impl<'a, L: Label> Iterator for PredictiveIter<'a, L> {
+    type Item = SearchMatch<L>;
+
+    fn next(&mut self) -> Option<SearchMatch<L>> {
+        while let Some((node_idx, key)) = self.stack.pop() {
+            let node = &self.da.nodes[node_idx as usize];
+            let base = node.base();
+
+            // Collect children via the first child + sibling chain
+            // We process children in reverse order so the stack pops in forward order
+            let mut children: Vec<(u32, bool)> = Vec::new(); // (child_idx, is_terminal)
+
+            // Check terminal child first (code 0): base XOR 0 = base
+            let terminal_idx = base;
+            if (terminal_idx as usize) < self.da.nodes.len()
+                && self.da.nodes[terminal_idx as usize].check() == node_idx
+            {
+                children.push((terminal_idx, true));
+
+                // Follow sibling chain from terminal
+                let mut sib = self.da.siblings[terminal_idx as usize];
+                while sib != 0 {
+                    children.push((sib, false));
+                    sib = self.da.siblings[sib as usize];
+                }
+            } else {
+                // No terminal child — find first non-terminal child
+                if let Some(first) = self.da.first_child(node_idx) {
+                    children.push((first, false));
+                    let mut sib = self.da.siblings[first as usize];
+                    while sib != 0 {
+                        children.push((sib, false));
+                        sib = self.da.siblings[sib as usize];
+                    }
+                }
+            }
+
+            // Push non-terminal children onto stack in reverse order (for DFS ordering)
+            // and collect any terminal matches
+            let mut result: Option<SearchMatch<L>> = None;
+
+            for &(child_idx, is_terminal) in children.iter().rev() {
+                if is_terminal {
+                    let child = &self.da.nodes[child_idx as usize];
+                    if child.is_leaf() {
+                        result = Some(SearchMatch {
+                            key: key.clone(),
+                            value_id: child.value_id(),
+                        });
+                    }
+                } else {
+                    // Reconstruct the label for this child from its code
+                    let child_code = base ^ child_idx;
+                    let label_u32 = self.da.code_map.reverse(child_code);
+                    if let Ok(label) = L::try_from(label_u32) {
+                        let mut child_key = key.clone();
+                        child_key.push(label);
+                        self.stack.push((child_idx, child_key));
+                    }
+                }
+            }
+
+            if let Some(r) = result {
+                return Some(r);
+            }
+        }
+        None
     }
 }
 
@@ -343,5 +470,70 @@ mod tests {
         let da = build_u8(&[]);
         let results: Vec<PrefixMatch> = da.common_prefix_search(b"abc").collect();
         assert!(results.is_empty());
+    }
+
+    // === predictive_search tests ===
+
+    #[test]
+    fn predictive_search_basic() {
+        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
+        let da = build_u8(&keys);
+
+        let results: Vec<SearchMatch<u8>> = da.predictive_search(b"a").collect();
+        // Should find "a", "ab", "abc"
+        let mut value_ids: Vec<u32> = results.iter().map(|r| r.value_id).collect();
+        value_ids.sort();
+        assert_eq!(value_ids, vec![0, 1, 2]); // "a"=0, "ab"=1, "abc"=2
+    }
+
+    #[test]
+    fn predictive_search_empty_prefix() {
+        let keys: Vec<&[u8]> = vec![b"a", b"b", b"c"];
+        let da = build_u8(&keys);
+
+        let results: Vec<SearchMatch<u8>> = da.predictive_search(b"").collect();
+        // Empty prefix = all keys
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn predictive_search_no_match() {
+        let da = build_u8(&[b"abc", b"abd"]);
+        let results: Vec<SearchMatch<u8>> = da.predictive_search(b"xyz").collect();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn predictive_search_exact_only() {
+        let da = build_u8(&[b"abc"]);
+        let results: Vec<SearchMatch<u8>> = da.predictive_search(b"abc").collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, b"abc");
+        assert_eq!(results[0].value_id, 0);
+    }
+
+    #[test]
+    fn predictive_search_key_reconstruction() {
+        let keys: Vec<&[u8]> = vec![b"ab", b"abc", b"abd"];
+        let da = build_u8(&keys);
+
+        let mut results: Vec<SearchMatch<u8>> = da.predictive_search(b"ab").collect();
+        results.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].key, b"ab");
+        assert_eq!(results[1].key, b"abc");
+        assert_eq!(results[2].key, b"abd");
+    }
+
+    #[test]
+    fn predictive_search_char_keys() {
+        let da = build_char(&["あ", "あい", "あいう", "か"]);
+        let prefix: Vec<char> = "あ".chars().collect();
+        let results: Vec<SearchMatch<char>> = da.predictive_search(&prefix).collect();
+        // Should find "あ", "あい", "あいう"
+        assert_eq!(results.len(), 3);
+        let mut keys: Vec<String> = results.iter().map(|r| r.key.iter().collect()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["あ", "あい", "あいう"]);
     }
 }
