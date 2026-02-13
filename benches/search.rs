@@ -48,13 +48,13 @@ fn generate_char_keys(n: usize, seed: u64) -> Vec<Vec<char>> {
 
 fn romaji_keys() -> Vec<&'static [u8]> {
     vec![
-        b"a", b"ba", b"be", b"bi", b"bo", b"bu", b"chi", b"da", b"de", b"di", b"do", b"du",
-        b"fu", b"ga", b"ge", b"gi", b"go", b"gu", b"ha", b"he", b"hi", b"ho", b"hu", b"i",
-        b"ja", b"ji", b"jo", b"ju", b"ka", b"ke", b"ki", b"ko", b"ku", b"ma", b"me", b"mi",
-        b"mo", b"mu", b"n", b"na", b"ne", b"ni", b"no", b"nu", b"o", b"pa", b"pe", b"pi",
-        b"po", b"pu", b"ra", b"re", b"ri", b"ro", b"ru", b"sa", b"se", b"sha", b"shi", b"sho",
-        b"shu", b"si", b"so", b"su", b"ta", b"te", b"ti", b"to", b"tsu", b"tu", b"u", b"wa",
-        b"wo", b"ya", b"yo", b"yu", b"za", b"ze", b"zi", b"zo", b"zu",
+        b"a", b"ba", b"be", b"bi", b"bo", b"bu", b"chi", b"da", b"de", b"di", b"do", b"du", b"fu",
+        b"ga", b"ge", b"gi", b"go", b"gu", b"ha", b"he", b"hi", b"ho", b"hu", b"i", b"ja", b"ji",
+        b"jo", b"ju", b"ka", b"ke", b"ki", b"ko", b"ku", b"ma", b"me", b"mi", b"mo", b"mu", b"n",
+        b"na", b"ne", b"ni", b"no", b"nu", b"o", b"pa", b"pe", b"pi", b"po", b"pu", b"ra", b"re",
+        b"ri", b"ro", b"ru", b"sa", b"se", b"sha", b"shi", b"sho", b"shu", b"si", b"so", b"su",
+        b"ta", b"te", b"ti", b"to", b"tsu", b"tu", b"u", b"wa", b"wo", b"ya", b"yo", b"yu", b"za",
+        b"ze", b"zi", b"zo", b"zu",
     ]
 }
 
@@ -144,8 +144,9 @@ fn bench_common_prefix_search(c: &mut Criterion) {
     c.bench_function("common_prefix_search_viterbi", |b| {
         b.iter(|| {
             for offset in 0..sentence.len() {
-                let results: Vec<_> =
-                    da.common_prefix_search(black_box(&sentence[offset..])).collect();
+                let results: Vec<_> = da
+                    .common_prefix_search(black_box(&sentence[offset..]))
+                    .collect();
                 black_box(&results);
             }
         });
