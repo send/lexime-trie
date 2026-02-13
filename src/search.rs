@@ -129,8 +129,48 @@ impl<L: Label> DoubleArray<L> {
     }
 
     /// Probe a key. Returns whether the key exists and whether it has children.
-    pub fn probe(&self, _key: &[L]) -> ProbeResult {
-        todo!("probe will be implemented in feat/probe")
+    ///
+    /// The 4 possible states:
+    /// - `None`: key not in trie, not a prefix of any key
+    /// - `Prefix`: key is a prefix of other keys but not a key itself
+    /// - `Exact`: key exists but is not a prefix of other keys
+    /// - `ExactAndPrefix`: key exists and is also a prefix of other keys
+    pub fn probe(&self, key: &[L]) -> ProbeResult {
+        let node_idx = match self.traverse(key) {
+            Some(idx) => idx,
+            None => {
+                return ProbeResult {
+                    value: None,
+                    has_children: false,
+                }
+            }
+        };
+
+        let node = &self.nodes[node_idx as usize];
+        let base = node.base();
+
+        // Check terminal child: base XOR 0 = base
+        let terminal_idx = base;
+        if (terminal_idx as usize) < self.nodes.len()
+            && self.nodes[terminal_idx as usize].check() == node_idx
+            && self.nodes[terminal_idx as usize].is_leaf()
+        {
+            // Terminal child exists — key is in the trie
+            let value_id = self.nodes[terminal_idx as usize].value_id();
+            // has_children = terminal has siblings (other children of this node)
+            let has_children = self.siblings[terminal_idx as usize] != 0;
+            ProbeResult {
+                value: Some(value_id),
+                has_children,
+            }
+        } else {
+            // No terminal child — key is not in the trie, but node exists
+            // so it must have non-terminal children (it's a prefix)
+            ProbeResult {
+                value: None,
+                has_children: true,
+            }
+        }
     }
 }
 
@@ -535,5 +575,110 @@ mod tests {
         let mut keys: Vec<String> = results.iter().map(|r| r.key.iter().collect()).collect();
         keys.sort();
         assert_eq!(keys, vec!["あ", "あい", "あいう"]);
+    }
+
+    // === probe tests ===
+
+    #[test]
+    fn probe_none() {
+        let da = build_u8(&[b"abc"]);
+        let result = da.probe(b"xyz");
+        assert_eq!(
+            result,
+            ProbeResult {
+                value: None,
+                has_children: false,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_prefix() {
+        let da = build_u8(&[b"abc"]);
+        let result = da.probe(b"ab");
+        assert_eq!(
+            result,
+            ProbeResult {
+                value: None,
+                has_children: true,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_exact() {
+        let da = build_u8(&[b"abc"]);
+        let result = da.probe(b"abc");
+        assert_eq!(
+            result,
+            ProbeResult {
+                value: Some(0),
+                has_children: false,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_exact_and_prefix() {
+        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
+        let da = build_u8(&keys);
+        let result = da.probe(b"a");
+        assert_eq!(
+            result,
+            ProbeResult {
+                value: Some(0),
+                has_children: true,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_romaji_scenario() {
+        // Simulates romaji trie: "n"→ん, "na"→な, "ni"→に, "nu"→ぬ, "shi"→し
+        let keys: Vec<&[u8]> = vec![b"n", b"na", b"ni", b"nu", b"shi"];
+        let da = build_u8(&keys);
+
+        // "n" is both exact and prefix (of "na", "ni", "nu")
+        let r = da.probe(b"n");
+        assert_eq!(r.value, Some(0));
+        assert!(r.has_children);
+
+        // "s" is prefix only (of "shi")
+        let r = da.probe(b"s");
+        assert_eq!(r.value, None);
+        assert!(r.has_children);
+
+        // "sh" is prefix only
+        let r = da.probe(b"sh");
+        assert_eq!(r.value, None);
+        assert!(r.has_children);
+
+        // "shi" is exact, no further children
+        let r = da.probe(b"shi");
+        assert_eq!(r.value, Some(4));
+        assert!(!r.has_children);
+
+        // "na" is exact, no further children
+        let r = da.probe(b"na");
+        assert_eq!(r.value, Some(1));
+        assert!(!r.has_children);
+
+        // "x" doesn't exist
+        let r = da.probe(b"x");
+        assert_eq!(r.value, None);
+        assert!(!r.has_children);
+    }
+
+    #[test]
+    fn probe_empty_trie() {
+        let da = build_u8(&[]);
+        let result = da.probe(b"abc");
+        assert_eq!(
+            result,
+            ProbeResult {
+                value: None,
+                has_children: false,
+            }
+        );
     }
 }
