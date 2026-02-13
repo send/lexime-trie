@@ -1,4 +1,4 @@
-use crate::{CodeMapper, DoubleArray, Label, TrieError, Node};
+use crate::{CodeMapper, DoubleArray, Label, Node, TrieError};
 
 const MAGIC: &[u8; 4] = b"LXTR";
 const VERSION: u8 = 1;
