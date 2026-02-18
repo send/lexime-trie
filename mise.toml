@@ -18,6 +18,10 @@ run = "cargo fmt"
 description = "Check formatting"
 run = "cargo fmt --check"
 
+[tasks.miri]
+description = "Run tests under Miri (requires nightly)"
+run = "cargo +nightly miri test"
+
 [tasks.bench]
 description = "Run benchmarks"
 run = "cargo bench"
