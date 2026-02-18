@@ -69,7 +69,11 @@ impl<L: Label> DoubleArray<L> {
         let siblings_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
         let code_map_len = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
 
-        let expected_size = HEADER_SIZE + nodes_len + siblings_len + code_map_len;
+        let expected_size = HEADER_SIZE
+            .checked_add(nodes_len)
+            .and_then(|s| s.checked_add(siblings_len))
+            .and_then(|s| s.checked_add(code_map_len))
+            .ok_or(TrieError::TruncatedData)?;
         if bytes.len() < expected_size {
             return Err(TrieError::TruncatedData);
         }

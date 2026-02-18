@@ -29,7 +29,7 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
     ///
     /// The byte slice must:
     /// - Use the LXTR v2 binary format (24-byte header)
-    /// - Be aligned to at least 8 bytes (for `Node` access)
+    /// - Be aligned to at least 4 bytes (for `Node` and `u32` access)
     ///
     /// # Errors
     ///
@@ -56,7 +56,11 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
         let siblings_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
         let code_map_len = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
 
-        let expected_size = HEADER_SIZE + nodes_len + siblings_len + code_map_len;
+        let expected_size = HEADER_SIZE
+            .checked_add(nodes_len)
+            .and_then(|s| s.checked_add(siblings_len))
+            .and_then(|s| s.checked_add(code_map_len))
+            .ok_or(TrieError::TruncatedData)?;
         if bytes.len() < expected_size {
             return Err(TrieError::TruncatedData);
         }
@@ -71,25 +75,31 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
             return Err(TrieError::TruncatedData);
         }
 
-        let nodes_ptr = bytes[HEADER_SIZE..].as_ptr();
-
-        // Check alignment for Node (align 4) — header is 24 bytes so if buffer
-        // base is 8-aligned, nodes_ptr is also 8-aligned. But verify at runtime.
-        if !(nodes_ptr as usize).is_multiple_of(mem::align_of::<Node>()) {
-            return Err(TrieError::MisalignedData);
-        }
-
-        let siblings_ptr = bytes[HEADER_SIZE + nodes_len..].as_ptr();
-        if !(siblings_ptr as usize).is_multiple_of(mem::align_of::<u32>()) {
-            return Err(TrieError::MisalignedData);
-        }
-
         let node_count = nodes_len / mem::size_of::<Node>();
         let sibling_count = siblings_len / mem::size_of::<u32>();
 
+        let nodes_ptr = bytes[HEADER_SIZE..].as_ptr();
+        let siblings_ptr = bytes[HEADER_SIZE + nodes_len..].as_ptr();
+
+        // Check alignment only when sections are non-empty, because
+        // as_ptr() on an empty sub-slice may return a dangling pointer.
+        if node_count > 0
+            && !(nodes_ptr as usize).is_multiple_of(mem::align_of::<Node>())
+        {
+            return Err(TrieError::MisalignedData);
+        }
+
+        if sibling_count > 0
+            && !(siblings_ptr as usize).is_multiple_of(mem::align_of::<u32>())
+        {
+            return Err(TrieError::MisalignedData);
+        }
+
         // SAFETY:
         // - `Node` is `#[repr(C)]` with two `u32` fields, size 8, align 4, no padding
-        // - We verified alignment and bounds above
+        // - We verified alignment and bounds above (skipped when count is 0,
+        //   which is safe because from_raw_parts with count 0 requires only
+        //   a non-null pointer, which sub-slice as_ptr() guarantees)
         // - The data is valid for any bit pattern (u32 fields)
         // - The lifetime `'a` ties the slice to the input buffer
         // - We only support little-endian platforms (x86_64, aarch64) where the
@@ -272,25 +282,25 @@ mod tests {
         let da = build_u8(&keys);
         let bytes = da.as_bytes();
 
-        // Allocate a buffer with extra room, then find an offset that makes
-        // the nodes section (at +24 from slice start) misaligned to 4 bytes.
-        let buf = vec![0u8; bytes.len() + 16];
+        // Allocate a single buffer with extra room, then find an offset that
+        // makes the nodes section (at +24 from slice start) misaligned to 4 bytes.
+        let mut buf = vec![0u8; bytes.len() + 16];
         let base = buf.as_ptr() as usize;
 
-        // We need (base + offset + 24) % 4 != 0, i.e. (base + offset) % 4 != 0.
-        // Try offsets 0..4 until we find one that is NOT 4-aligned.
-        let offset = (0..4).find(|&o| (base + o + 24) % 4 != 0);
+        // We need (base + offset + 24) % 4 != 0.
+        // Since 24 % 4 == 0, we need (base + offset) % 4 != 0.
+        // At least 3 of offsets 0..4 satisfy this.
+        let offset = (0..4)
+            .find(|&o| (base + o + 24) % 4 != 0)
+            .expect("at least one offset should be misaligned");
 
-        if let Some(offset) = offset {
-            let mut buf = vec![0u8; bytes.len() + 16];
-            buf[offset..offset + bytes.len()].copy_from_slice(&bytes);
-            let misaligned_slice = &buf[offset..offset + bytes.len()];
+        buf[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        let misaligned_slice = &buf[offset..offset + bytes.len()];
 
-            assert!(matches!(
-                DoubleArrayRef::<u8>::from_bytes_ref(misaligned_slice),
-                Err(TrieError::MisalignedData)
-            ));
-        }
+        assert!(matches!(
+            DoubleArrayRef::<u8>::from_bytes_ref(misaligned_slice),
+            Err(TrieError::MisalignedData)
+        ));
     }
 
     #[test]
