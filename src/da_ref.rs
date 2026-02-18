@@ -220,9 +220,7 @@ mod tests {
         fn as_slice(&self) -> &[u8] {
             // SAFETY: _backing is at least `self.len` bytes; u64 alignment (8)
             // satisfies the Node/u32 alignment requirement (4).
-            unsafe {
-                std::slice::from_raw_parts(self._backing.as_ptr() as *const u8, self.len)
-            }
+            unsafe { std::slice::from_raw_parts(self._backing.as_ptr() as *const u8, self.len) }
         }
     }
 
@@ -327,9 +325,8 @@ mod tests {
         // Use Vec<u64> for guaranteed 8-byte base alignment.
         let extra = vec![0u64; (bytes.len() + 16 + 7) / 8];
         let base = extra.as_ptr() as usize;
-        let buf = unsafe {
-            std::slice::from_raw_parts(extra.as_ptr() as *const u8, extra.len() * 8)
-        };
+        let buf =
+            unsafe { std::slice::from_raw_parts(extra.as_ptr() as *const u8, extra.len() * 8) };
 
         // We need (base + offset + 24) % 4 != 0.
         // Since 24 % 4 == 0, we need (base + offset) % 4 != 0.

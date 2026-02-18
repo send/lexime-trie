@@ -32,16 +32,12 @@ impl CodeMapper {
             }
         }
 
-        if keys.is_empty() || max_label == 0 && keys.iter().all(|k| k.as_ref().is_empty()) {
-            // No labels at all
-            let has_labels = keys.iter().any(|k| !k.as_ref().is_empty());
-            if !has_labels {
-                return Self {
-                    table: vec![],
-                    reverse_table: vec![0],
-                    alphabet_size: 1,
-                };
-            }
+        if keys.is_empty() || keys.iter().all(|k| k.as_ref().is_empty()) {
+            return Self {
+                table: vec![],
+                reverse_table: vec![0],
+                alphabet_size: 1,
+            };
         }
 
         let table_size = max_label as usize + 1;
