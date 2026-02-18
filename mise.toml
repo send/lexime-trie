@@ -22,6 +22,22 @@ run = "cargo fmt --check"
 description = "Run tests under Miri (requires nightly)"
 run = "cargo +nightly miri test"
 
+[tasks.release]
+description = "Tag, push, and publish to crates.io"
+run = """
+set -e
+VERSION="v$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[0].version')"
+cargo publish --dry-run
+git tag "$VERSION"
+git push origin "$VERSION"
+cargo publish
+echo "Released $VERSION"
+"""
+
+[tasks."release:dry"]
+description = "Dry-run publish to crates.io"
+run = "cargo publish --dry-run"
+
 [tasks.bench]
 description = "Run benchmarks"
 run = "cargo bench"
