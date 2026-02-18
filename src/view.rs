@@ -81,12 +81,15 @@ impl<'a, L: Label> TrieView<'a, L> {
     pub(crate) fn predictive_search(self, prefix: &[L]) -> PredictiveIter<'a, L> {
         let start_node = self.traverse(prefix);
         let mut stack = Vec::new();
+        let key_buf = prefix.to_vec();
         if let Some(node) = start_node {
-            stack.push((node, prefix.to_vec()));
+            // None label = root entry; key_buf is already set to the prefix.
+            stack.push((node, prefix.len() as u32, None));
         }
         PredictiveIter {
             view: self,
             stack,
+            key_buf,
             children_buf: Vec::new(),
         }
     }
@@ -226,7 +229,13 @@ impl<L: Label> Iterator for CommonPrefixIter<'_, L> {
 
 pub(crate) struct PredictiveIter<'a, L: Label> {
     view: TrieView<'a, L>,
-    stack: Vec<(u32, Vec<L>)>,
+    /// DFS stack: (node_idx, parent_depth, label_to_append).
+    /// `None` label = root entry (prefix node); the key_buf already contains
+    /// the prefix so no label needs to be appended.
+    stack: Vec<(u32, u32, Option<L>)>,
+    /// Shared key buffer. Grows/truncates as DFS proceeds, avoiding per-node
+    /// Vec<L> clones. Only cloned when emitting a SearchMatch.
+    key_buf: Vec<L>,
     /// Reusable buffer for collecting children within a single `next()` call.
     children_buf: Vec<(u32, bool)>,
 }
@@ -236,7 +245,14 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
 
     fn next(&mut self) -> Option<SearchMatch<L>> {
         let node_count = self.view.nodes.len();
-        while let Some((node_idx, key)) = self.stack.pop() {
+        while let Some((node_idx, parent_depth, label)) = self.stack.pop() {
+            // Restore key_buf to the parent's depth, then append this node's label.
+            self.key_buf.truncate(parent_depth as usize);
+            if let Some(l) = label {
+                self.key_buf.push(l);
+            }
+            let depth = self.key_buf.len() as u32;
+
             let node = &self.view.nodes[node_idx as usize];
             let base = node.base();
 
@@ -275,17 +291,15 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
                     let child = &self.view.nodes[child_idx as usize];
                     if child.is_leaf() {
                         result = Some(SearchMatch {
-                            key: key.clone(),
+                            key: self.key_buf.clone(),
                             value_id: child.value_id(),
                         });
                     }
                 } else {
                     let child_code = base ^ child_idx;
                     let label_u32 = self.view.code_map.reverse(child_code);
-                    if let Ok(label) = L::try_from(label_u32) {
-                        let mut child_key = key.clone();
-                        child_key.push(label);
-                        self.stack.push((child_idx, child_key));
+                    if let Ok(l) = L::try_from(label_u32) {
+                        self.stack.push((child_idx, depth, Some(l)));
                     }
                 }
             }
