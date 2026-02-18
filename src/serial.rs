@@ -54,7 +54,11 @@ impl<L: Label> DoubleArray<L> {
             "code_map section exceeds u32::MAX bytes"
         );
 
-        let total = HEADER_SIZE + nodes_raw.len() + siblings_raw.len() + code_map_size;
+        let total = HEADER_SIZE
+            .checked_add(nodes_raw.len())
+            .and_then(|s| s.checked_add(siblings_raw.len()))
+            .and_then(|s| s.checked_add(code_map_size))
+            .expect("total serialized size exceeds usize::MAX");
         let mut buf = Vec::with_capacity(total);
 
         // Header (24 bytes)

@@ -40,7 +40,9 @@ impl CodeMapper {
             };
         }
 
-        let table_size = max_label as usize + 1;
+        let table_size = (max_label as usize)
+            .checked_add(1)
+            .expect("CodeMapper::build: label space too large for this platform");
 
         // Direct frequency counting — avoids HashMap overhead.
         let mut freq = vec![0u64; table_size];
