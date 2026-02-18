@@ -76,7 +76,11 @@ impl<'a, L: Label> TrieView<'a, L> {
         if let Some(node) = start_node {
             stack.push((node, prefix.to_vec()));
         }
-        PredictiveIter { view: self, stack }
+        PredictiveIter {
+            view: self,
+            stack,
+            children_buf: Vec::new(),
+        }
     }
 
     /// Finds the first child of `node_idx`.
@@ -207,41 +211,50 @@ impl<L: Label> Iterator for CommonPrefixIter<'_, L> {
 pub(crate) struct PredictiveIter<'a, L: Label> {
     view: TrieView<'a, L>,
     stack: Vec<(u32, Vec<L>)>,
+    /// Reusable buffer for collecting children within a single `next()` call.
+    children_buf: Vec<(u32, bool)>,
 }
 
 impl<L: Label> Iterator for PredictiveIter<'_, L> {
     type Item = SearchMatch<L>;
 
     fn next(&mut self) -> Option<SearchMatch<L>> {
+        let node_count = self.view.nodes.len();
         while let Some((node_idx, key)) = self.stack.pop() {
             let node = &self.view.nodes[node_idx as usize];
             let base = node.base();
 
-            let mut children: Vec<(u32, bool)> = Vec::new();
+            self.children_buf.clear();
 
             let terminal_idx = base;
-            if (terminal_idx as usize) < self.view.nodes.len()
+            if (terminal_idx as usize) < node_count
                 && self.view.nodes[terminal_idx as usize].check() == node_idx
             {
-                children.push((terminal_idx, true));
+                self.children_buf.push((terminal_idx, true));
 
                 let mut sib = self.view.siblings[terminal_idx as usize];
-                while sib != 0 {
-                    children.push((sib, false));
+                // Guard against cycles in malformed data
+                let mut steps = 0u32;
+                while sib != 0 && (steps as usize) < node_count {
+                    self.children_buf.push((sib, false));
                     sib = self.view.siblings[sib as usize];
+                    steps += 1;
                 }
             } else if let Some(first) = self.view.first_child(node_idx) {
-                children.push((first, false));
+                self.children_buf.push((first, false));
                 let mut sib = self.view.siblings[first as usize];
-                while sib != 0 {
-                    children.push((sib, false));
+                let mut steps = 0u32;
+                while sib != 0 && (steps as usize) < node_count {
+                    self.children_buf.push((sib, false));
                     sib = self.view.siblings[sib as usize];
+                    steps += 1;
                 }
             }
 
             let mut result: Option<SearchMatch<L>> = None;
 
-            for &(child_idx, is_terminal) in children.iter().rev() {
+            for i in (0..self.children_buf.len()).rev() {
+                let (child_idx, is_terminal) = self.children_buf[i];
                 if is_terminal {
                     let child = &self.view.nodes[child_idx as usize];
                     if child.is_leaf() {

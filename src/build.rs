@@ -245,18 +245,17 @@ impl<L: Label> DoubleArray<L> {
         }
 
         if keys.is_empty() {
-            return Self::new(vec![Node::default()], vec![0], CodeMapper::build::<L>(&[]));
+            let empty: &[Vec<L>] = &[];
+            return Self::new(vec![Node::default()], vec![0], CodeMapper::build(empty));
         }
 
-        // Convert keys to Vec<L> for CodeMapper
-        let key_vecs: Vec<Vec<L>> = keys.iter().map(|k| k.as_ref().to_vec()).collect();
-        let code_map = CodeMapper::build(&key_vecs);
+        let code_map = CodeMapper::build(keys);
 
         // Convert keys to code sequences with terminal symbol (0) appended
-        let coded_keys: Vec<Vec<u32>> = key_vecs
+        let coded_keys: Vec<Vec<u32>> = keys
             .iter()
             .map(|k| {
-                let mut codes: Vec<u32> = k.iter().map(|&l| code_map.get(l)).collect();
+                let mut codes: Vec<u32> = k.as_ref().iter().map(|&l| code_map.get(l)).collect();
                 codes.push(0); // terminal symbol
                 codes
             })
