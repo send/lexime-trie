@@ -44,11 +44,11 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
             return Err(TrieError::TruncatedData);
         }
 
-        if &bytes[0..4] != b"LXTR" {
+        if &bytes[0..4] != crate::serial::MAGIC {
             return Err(TrieError::InvalidMagic);
         }
 
-        if bytes[4] != 2 {
+        if bytes[4] != crate::serial::VERSION {
             return Err(TrieError::InvalidVersion);
         }
 

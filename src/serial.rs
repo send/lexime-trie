@@ -1,7 +1,7 @@
 use crate::{CodeMapper, DoubleArray, Label, Node, TrieError};
 
-const MAGIC: &[u8; 4] = b"LXTR";
-const VERSION: u8 = 2;
+pub(crate) const MAGIC: &[u8; 4] = b"LXTR";
+pub(crate) const VERSION: u8 = 2;
 /// Header: magic(4) + version(1) + reserved(3) + nodes_len(4) + siblings_len(4) + code_map_len(4) + reserved(4) = 24
 pub(crate) const HEADER_SIZE: usize = 24;
 
