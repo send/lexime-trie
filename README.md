@@ -86,6 +86,11 @@ let da = DoubleArray::<char>::build(&keys);
 assert!(da.exact_match(&"あい".chars().collect::<Vec<_>>()).is_some());
 ```
 
+## Platform Requirements
+
+- **Little-endian only** (x86_64, aarch64, etc.). The crate emits a `compile_error!` on big-endian targets.
+- Serialization uses native LE layout for zero-copy performance; the binary format is not portable to big-endian platforms.
+
 ## Design
 
 See [SPEC.md](https://github.com/send/lexime-trie/blob/main/SPEC.md) for the full design document.

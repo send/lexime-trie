@@ -282,8 +282,8 @@ Offset  Size  Content
 - Three sections: `nodes`, `siblings`, `code_map`
 - Raw `#[repr(C)]` data (serialized as little-endian)
 - Copy-load: ~5ms, runs once at app startup
-- **Endianness**: serialization uses little-endian (`to_le_bytes` / `from_le_bytes`),
-  ensuring cross-platform compatibility
+- **Little-endian only**: the crate requires a little-endian platform (`compile_error!` on BE).
+  Serialization writes native LE layout directly, enabling zero-copy deserialization without byte-swapping
 
 ### Zero-Copy Deserialization
 

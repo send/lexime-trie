@@ -283,8 +283,8 @@ Offset  Size  内容
 - セクション: `nodes`, `siblings`, `code_map` の 3 つ
 - バイト列は `#[repr(C)]` の生データ (little-endian で serialize)
 - コピーロード: ~5ms。アプリ起動時 1 回のみ
-- **エンディアン**: シリアライズは little-endian (`to_le_bytes` / `from_le_bytes`) で正規化済み。
-  クロスプラットフォームで互換性あり
+- **リトルエンディアン専用**: 本クレートは LE プラットフォームを要求する (BE では `compile_error!`)。
+  シリアライズはネイティブ LE レイアウトをそのまま書き出し、バイトスワップなしの zero-copy デシリアライズを実現
 
 ### Zero-Copy デシリアライズ
 
