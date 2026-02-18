@@ -41,6 +41,19 @@ impl<L: Label> DoubleArray<L> {
         let siblings_raw = unsafe { as_byte_slice(&self.siblings) };
         let code_map_size = self.code_map.serialized_size();
 
+        debug_assert!(
+            nodes_raw.len() <= u32::MAX as usize,
+            "nodes section exceeds u32::MAX bytes"
+        );
+        debug_assert!(
+            siblings_raw.len() <= u32::MAX as usize,
+            "siblings section exceeds u32::MAX bytes"
+        );
+        debug_assert!(
+            code_map_size <= u32::MAX as usize,
+            "code_map section exceeds u32::MAX bytes"
+        );
+
         let total = HEADER_SIZE + nodes_raw.len() + siblings_raw.len() + code_map_size;
         let mut buf = Vec::with_capacity(total);
 

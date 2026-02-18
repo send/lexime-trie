@@ -320,13 +320,14 @@ mod tests {
         let da = build_u8(&keys);
         let bytes = da.as_bytes();
 
-        // Allocate a single buffer with extra room, then find an offset that
-        // makes the nodes section (at +24 from slice start) misaligned to 4 bytes.
-        // Use Vec<u64> for guaranteed 8-byte base alignment.
-        let extra = vec![0u64; (bytes.len() + 16 + 7) / 8];
-        let base = extra.as_ptr() as usize;
-        let buf =
-            unsafe { std::slice::from_raw_parts(extra.as_ptr() as *const u8, extra.len() * 8) };
+        // Allocate a buffer with extra room, using Vec<u64> for guaranteed
+        // 8-byte base alignment. We write into this buffer directly so the
+        // offset calculation matches the actual slice being tested.
+        let mut backing = vec![0u64; (bytes.len() + 16 + 7) / 8];
+        let buf = unsafe {
+            std::slice::from_raw_parts_mut(backing.as_mut_ptr() as *mut u8, backing.len() * 8)
+        };
+        let base = buf.as_ptr() as usize;
 
         // We need (base + offset + 24) % 4 != 0.
         // Since 24 % 4 == 0, we need (base + offset) % 4 != 0.
@@ -335,9 +336,8 @@ mod tests {
             .find(|&o| (base + o + 24) % 4 != 0)
             .expect("at least one offset should be misaligned");
 
-        let mut writable = buf.to_vec();
-        writable[offset..offset + bytes.len()].copy_from_slice(&bytes);
-        let misaligned_slice = &writable[offset..offset + bytes.len()];
+        buf[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        let misaligned_slice = &buf[offset..offset + bytes.len()];
 
         assert!(matches!(
             DoubleArrayRef::<u8>::from_bytes_ref(misaligned_slice),

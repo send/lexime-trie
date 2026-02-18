@@ -81,7 +81,11 @@ impl<'a, L: Label> TrieView<'a, L> {
     pub(crate) fn predictive_search(self, prefix: &[L]) -> PredictiveIter<'a, L> {
         let start_node = self.traverse(prefix);
         let mut stack = Vec::new();
-        let key_buf = prefix.to_vec();
+        let key_buf = if start_node.is_some() {
+            prefix.to_vec()
+        } else {
+            Vec::new()
+        };
         if let Some(node) = start_node {
             // None label = root entry; key_buf is already set to the prefix.
             stack.push((node, prefix.len() as u32, None));
@@ -265,9 +269,9 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
                 self.children_buf.push((terminal_idx, true));
 
                 let mut sib = self.view.siblings[terminal_idx as usize];
-                // Guard against cycles in malformed data
+                // Guard against cycles and out-of-range indices in malformed data
                 let mut steps = 0u32;
-                while sib != 0 && (steps as usize) < node_count {
+                while sib != 0 && (sib as usize) < node_count && (steps as usize) < node_count {
                     self.children_buf.push((sib, false));
                     sib = self.view.siblings[sib as usize];
                     steps += 1;
@@ -276,7 +280,7 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
                 self.children_buf.push((first, false));
                 let mut sib = self.view.siblings[first as usize];
                 let mut steps = 0u32;
-                while sib != 0 && (steps as usize) < node_count {
+                while sib != 0 && (sib as usize) < node_count && (steps as usize) < node_count {
                     self.children_buf.push((sib, false));
                     sib = self.view.siblings[sib as usize];
                     steps += 1;
