@@ -1,6 +1,6 @@
 [package]
 name = "lexime-trie"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.87"
 description = "A char-wise Double-Array Trie with zero dependencies"
