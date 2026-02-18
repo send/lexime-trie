@@ -12,6 +12,7 @@ Replaces `trie-rs` + `bincode` with a compact, cache-friendly trie that supports
 - **Terminal symbol approach** — cleanly handles keys that are both exact matches and prefixes of other keys
 - **Sibling chain (SoA)** — enables predictive search via DFS without increasing node size for other operations
 - **Fast serialization** — binary format with `LXTR` magic header, ~5ms copy-load
+- **Zero-copy deserialization** — `DoubleArrayRef` borrows nodes/siblings directly from mmap or byte buffer
 
 ## Search Operations
 
@@ -51,6 +52,22 @@ let result = da.probe(b"ab");
 // Serialization
 let bytes = da.as_bytes();
 let da2 = DoubleArray::<u8>::from_bytes(&bytes).unwrap();
+```
+
+### Zero-copy deserialization
+
+```rust
+use lexime_trie::{DoubleArray, DoubleArrayRef};
+
+let da = DoubleArray::<u8>::build(&[b"abc", b"abd", b"xyz"]);
+let bytes = da.as_bytes();
+
+// Zero-copy: borrows nodes & siblings directly from the byte buffer
+let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(&bytes).unwrap();
+assert_eq!(da_ref.exact_match(b"abc"), Some(0));
+
+// Convert to owned if needed
+let da_owned = da_ref.to_owned();
 ```
 
 ### Char keys (dictionary)

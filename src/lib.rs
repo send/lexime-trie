@@ -4,6 +4,8 @@
 //! double-array structure. It supports exact match, common prefix search, predictive
 //! search, and probe operations over sequences of [`Label`] elements (`u8` or `char`).
 //!
+//! For zero-copy access to memory-mapped files, see [`DoubleArrayRef`].
+//!
 //! # Quick start
 //!
 //! ```
@@ -13,19 +15,35 @@
 //! let da = DoubleArray::<u8>::build(&keys);
 //! assert_eq!(da.exact_match(b"abc"), Some(2));
 //! ```
+//!
+//! # Zero-copy deserialization
+//!
+//! ```
+//! use lexime_trie::{DoubleArray, DoubleArrayRef};
+//!
+//! let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
+//! let da = DoubleArray::<u8>::build(&keys);
+//! let bytes = da.as_bytes();
+//!
+//! let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(&bytes).unwrap();
+//! assert_eq!(da_ref.exact_match(b"abc"), Some(2));
+//! ```
 
 #![warn(missing_docs)]
 
 mod build;
 mod code_map;
+mod da_ref;
 mod label;
 mod node;
 mod search;
 mod serial;
+mod view;
 
 use std::marker::PhantomData;
 
 pub use code_map::CodeMapper;
+pub use da_ref::DoubleArrayRef;
 pub use label::Label;
 pub use node::Node;
 pub use search::{PrefixMatch, ProbeResult, SearchMatch};
@@ -39,6 +57,8 @@ pub enum TrieError {
     InvalidVersion,
     /// The binary data is truncated or corrupted.
     TruncatedData,
+    /// The byte buffer is not properly aligned for zero-copy access.
+    MisalignedData,
 }
 
 impl std::fmt::Display for TrieError {
@@ -47,6 +67,7 @@ impl std::fmt::Display for TrieError {
             TrieError::InvalidMagic => write!(f, "invalid magic number"),
             TrieError::InvalidVersion => write!(f, "unsupported version"),
             TrieError::TruncatedData => write!(f, "truncated or corrupted data"),
+            TrieError::MisalignedData => write!(f, "misaligned data for zero-copy access"),
         }
     }
 }

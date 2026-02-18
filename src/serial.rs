@@ -1,26 +1,28 @@
 use crate::{CodeMapper, DoubleArray, Label, Node, TrieError};
 
 const MAGIC: &[u8; 4] = b"LXTR";
-const VERSION: u8 = 1;
-const HEADER_SIZE: usize = 4 + 1 + 4 + 4 + 4; // magic + version + 3 lengths = 17
+const VERSION: u8 = 2;
+/// Header: magic(4) + version(1) + reserved(3) + nodes_len(4) + siblings_len(4) + code_map_len(4) + reserved(4) = 24
+pub(crate) const HEADER_SIZE: usize = 24;
 
 impl<L: Label> DoubleArray<L> {
     /// Serializes the double-array trie to a byte vector.
     ///
-    /// Format:
+    /// Format (v2):
     /// ```text
     /// Offset  Size  Content
     /// 0       4     Magic: "LXTR"
-    /// 4       1     Version: 1
-    /// 5       4     nodes_len (u32 LE)
-    /// 9       4     siblings_len (u32 LE)
-    /// 13      4     code_map_len (u32 LE)
-    /// 17      N     nodes data (each node: base LE u32 + check LE u32)
-    /// 17+N    S     siblings data (each: u32 LE)
-    /// 17+N+S  C     code_map data
+    /// 4       1     Version: 0x02
+    /// 5       3     Reserved: [0, 0, 0]
+    /// 8       4     nodes_len (u32 LE, in bytes)
+    /// 12      4     siblings_len (u32 LE, in bytes)
+    /// 16      4     code_map_len (u32 LE, in bytes)
+    /// 20      4     Reserved: [0, 0, 0, 0]
+    /// 24      N     nodes data (each node: base LE u32 + check LE u32)
+    /// 24+N    S     siblings data (each: u32 LE)
+    /// 24+N+S  C     code_map data
     /// ```
     pub fn as_bytes(&self) -> Vec<u8> {
-        // Serialize nodes: each Node is base(u32 LE) + check(u32 LE)
         let nodes_data = serialize_nodes(&self.nodes);
         let siblings_data = serialize_u32_slice(&self.siblings);
         let code_map_data = self.code_map.as_bytes();
@@ -32,12 +34,14 @@ impl<L: Label> DoubleArray<L> {
         let total = HEADER_SIZE + nodes_data.len() + siblings_data.len() + code_map_data.len();
         let mut buf = Vec::with_capacity(total);
 
-        // Header
+        // Header (24 bytes)
         buf.extend_from_slice(MAGIC);
         buf.push(VERSION);
+        buf.extend_from_slice(&[0, 0, 0]); // reserved
         buf.extend_from_slice(&nodes_len.to_le_bytes());
         buf.extend_from_slice(&siblings_len.to_le_bytes());
         buf.extend_from_slice(&code_map_len.to_le_bytes());
+        buf.extend_from_slice(&[0, 0, 0, 0]); // reserved
 
         // Data sections
         buf.extend_from_slice(&nodes_data);
@@ -53,19 +57,17 @@ impl<L: Label> DoubleArray<L> {
             return Err(TrieError::TruncatedData);
         }
 
-        // Check magic
         if &bytes[0..4] != MAGIC {
             return Err(TrieError::InvalidMagic);
         }
 
-        // Check version
         if bytes[4] != VERSION {
             return Err(TrieError::InvalidVersion);
         }
 
-        let nodes_len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
-        let siblings_len = u32::from_le_bytes(bytes[9..13].try_into().unwrap()) as usize;
-        let code_map_len = u32::from_le_bytes(bytes[13..17].try_into().unwrap()) as usize;
+        let nodes_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let siblings_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let code_map_len = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
 
         let expected_size = HEADER_SIZE + nodes_len + siblings_len + code_map_len;
         if bytes.len() < expected_size {
@@ -74,17 +76,14 @@ impl<L: Label> DoubleArray<L> {
 
         let mut offset = HEADER_SIZE;
 
-        // Deserialize nodes
         let nodes = deserialize_nodes(&bytes[offset..offset + nodes_len])
             .ok_or(TrieError::TruncatedData)?;
         offset += nodes_len;
 
-        // Deserialize siblings
         let siblings = deserialize_u32_slice(&bytes[offset..offset + siblings_len])
             .ok_or(TrieError::TruncatedData)?;
         offset += siblings_len;
 
-        // Deserialize code_map
         let (code_map, _consumed) = CodeMapper::from_bytes(&bytes[offset..offset + code_map_len])
             .ok_or(TrieError::TruncatedData)?;
 
@@ -158,7 +157,6 @@ mod tests {
         let bytes = da.as_bytes();
         let da2 = DoubleArray::<u8>::from_bytes(&bytes).unwrap();
 
-        // Verify all searches work the same
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(da2.exact_match(key), Some(i as u32));
         }
@@ -210,6 +208,7 @@ mod tests {
     #[test]
     fn truncated_data() {
         let bytes = build_empty_u8().as_bytes();
+        // Truncate to just the header (no data sections)
         assert!(matches!(
             DoubleArray::<u8>::from_bytes(&bytes[..HEADER_SIZE]),
             Err(TrieError::TruncatedData)
@@ -231,12 +230,10 @@ mod tests {
         let bytes = da.as_bytes();
         let da2 = DoubleArray::<u8>::from_bytes(&bytes).unwrap();
 
-        // Test exact_match
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(da2.exact_match(key), Some(i as u32));
         }
 
-        // Test probe
         let r = da2.probe(b"n");
         assert_eq!(r.value, Some(0));
         assert!(r.has_children);
@@ -245,12 +242,21 @@ mod tests {
         assert_eq!(r.value, Some(4));
         assert!(!r.has_children);
 
-        // Test common_prefix_search
         let results: Vec<_> = da2.common_prefix_search(b"nab").collect();
         assert_eq!(results.len(), 2); // "n" and "na"
 
-        // Test predictive_search
         let results: Vec<_> = da2.predictive_search(b"n").collect();
         assert_eq!(results.len(), 4); // "n", "na", "ni", "nu"
+    }
+
+    #[test]
+    fn header_alignment() {
+        let da = build_empty_u8();
+        let bytes = da.as_bytes();
+
+        // Header is 24 bytes — nodes start at offset 24, which is 8-byte aligned
+        assert_eq!(bytes[4], VERSION);
+        assert_eq!(HEADER_SIZE, 24);
+        assert!(HEADER_SIZE.is_multiple_of(8));
     }
 }

@@ -250,11 +250,11 @@ pub struct ProbeResult {
 }
 ```
 
-### Serialization
+### Serialization (LXTR v2)
 
 ```rust
 impl<L: Label> DoubleArray<L> {
-    /// Serializes the internal data to a raw byte representation.
+    /// Serializes the internal data to a raw byte representation (v2 format).
     pub fn as_bytes(&self) -> Vec<u8>;
 
     /// Restores a DoubleArray from raw bytes (copy).
@@ -262,14 +262,75 @@ impl<L: Label> DoubleArray<L> {
 }
 ```
 
-- lexime-trie header: magic (`LXTR`) + version (1) + section lengths
+**v2 binary format** (24-byte header, 8-byte aligned):
+
+```
+Offset  Size  Content
+0       4     Magic: "LXTR"
+4       1     Version: 0x02
+5       3     Reserved: [0, 0, 0]
+8       4     nodes_len (u32 LE, in bytes)
+12      4     siblings_len (u32 LE, in bytes)
+16      4     code_map_len (u32 LE, in bytes)
+20      4     Reserved: [0, 0, 0, 0]
+24      N     nodes data (each node: base LE u32 + check LE u32)
+24+N    S     siblings data (each: u32 LE)
+24+N+S  C     code_map data
+```
+
+- The 24-byte header ensures `nodes` data starts at an 8-byte boundary (required for zero-copy)
 - Three sections: `nodes`, `siblings`, `code_map`
 - Raw `#[repr(C)]` data (serialized as little-endian)
 - Copy-load: ~5ms, runs once at app startup
-- Internal search logic operates on `&[Node]`, enabling future zero-copy
-  (`DoubleArrayRef<'a>`) addition in a backward-compatible manner
 - **Endianness**: serialization uses little-endian (`to_le_bytes` / `from_le_bytes`),
   ensuring cross-platform compatibility
+
+### Zero-Copy Deserialization
+
+```rust
+pub struct DoubleArrayRef<'a, L: Label> {
+    nodes: &'a [Node],       // borrowed from byte buffer
+    siblings: &'a [u32],     // borrowed from byte buffer
+    code_map: CodeMapper,    // always heap-allocated (small)
+    _phantom: PhantomData<L>,
+}
+
+impl<'a, L: Label> DoubleArrayRef<'a, L> {
+    /// Zero-copy deserialization from a byte slice (v2 format only).
+    /// The buffer must be aligned to at least 8 bytes.
+    pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError>;
+
+    /// All search methods: exact_match, common_prefix_search,
+    /// predictive_search, probe — identical API to DoubleArray.
+
+    /// Converts to an owned DoubleArray by copying nodes/siblings to heap.
+    pub fn to_owned(&self) -> DoubleArray<L>;
+}
+```
+
+- `nodes` and `siblings` are borrowed directly from the byte buffer via `unsafe` pointer cast
+- Safety relies on: `Node` being `#[repr(C)]` (8B, align 4, no padding), runtime alignment
+  validation, and LE-only target assumption (x86_64/aarch64)
+- `code_map` is always deserialized to heap (small, requires reconstruction from serialized form)
+- `from_bytes_ref` requires the LXTR v2 format (24-byte aligned header)
+- Typical use case: memory-map a file, then pass the buffer to `from_bytes_ref`
+
+### Shared Search Logic (TrieView)
+
+All search methods (`traverse`, `exact_match`, `common_prefix_search`, `predictive_search`,
+`first_child`, `probe`) are implemented once in `TrieView<'a, L>`:
+
+```rust
+#[derive(Clone, Copy)]
+pub(crate) struct TrieView<'a, L: Label> {
+    nodes: &'a [Node],
+    siblings: &'a [u32],
+    code_map: &'a CodeMapper,
+    _phantom: PhantomData<L>,
+}
+```
+
+Both `DoubleArray` and `DoubleArrayRef` delegate to `TrieView`, achieving zero code duplication.
 
 ### Error Type
 
@@ -281,6 +342,8 @@ pub enum TrieError {
     InvalidVersion,
     /// Binary data is truncated or corrupted
     TruncatedData,
+    /// Byte buffer is not properly aligned for zero-copy access
+    MisalignedData,
 }
 ```
 
@@ -358,8 +421,10 @@ lexime/
 │       ├── node.rs        Node (base + check, 8B)
 │       ├── code_map.rs    CodeMapper (frequency-ordered label remapping)
 │       ├── build.rs       DoubleArray::build() + sibling chain construction
-│       ├── search.rs      exact_match, common_prefix_search, predictive_search, probe
-│       └── serial.rs      as_bytes, from_bytes
+│       ├── search.rs      search method delegation to TrieView
+│       ├── serial.rs      as_bytes, from_bytes
+│       ├── view.rs        TrieView — shared search logic (exact_match, common_prefix_search, etc.)
+│       └── da_ref.rs      DoubleArrayRef — zero-copy deserialization
 ├── engine/                ← existing crate (depends on lexime-trie)
 │   └── Cargo.toml         remove trie-rs, serde, bincode → add lexime-trie
 └── Cargo.toml             ← workspace
@@ -369,8 +434,6 @@ lexime/
 
 - **No dynamic insert/delete**. Immutable, build-once trie only
 - **No compression (TAIL, MpTrie, etc.)** in the initial implementation. Can be added later
-- **No mmap zero-copy** in the initial implementation. Copy-load (~5ms) is fast enough.
-  Internal code uses `&[Node]`, allowing future addition of `DoubleArrayRef<'a>`
 
 ## Implementation Progress
 
@@ -380,5 +443,6 @@ lexime/
 4. **common_prefix_search** — needed for lattice construction ✅
 5. **predictive_search** — needed for prediction (uses sibling chain) ✅
 6. **probe** — needed for romaji trie ✅
-7. **as_bytes / from_bytes** — serialization ✅
-8. **lexime integration** — replace TrieDictionary and RomajiTrie internals
+7. **as_bytes / from_bytes** — serialization (LXTR v2 format) ✅
+8. **DoubleArrayRef / from_bytes_ref** — zero-copy mmap deserialization ✅
+9. **lexime integration** — replace TrieDictionary and RomajiTrie internals

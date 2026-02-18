@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use lexime_trie::DoubleArray;
+use lexime_trie::{DoubleArray, DoubleArrayRef};
 
 // ── Hand-rolled LCG (no external deps) ──────────────────────────────────────
 
@@ -85,6 +85,11 @@ fn bench_serial(c: &mut Criterion) {
     c.bench_function("serial_from_bytes", |b| {
         b.iter(|| {
             let _ = DoubleArray::<char>::from_bytes(black_box(&bytes)).unwrap();
+        });
+    });
+    c.bench_function("serial_from_bytes_ref", |b| {
+        b.iter(|| {
+            let _ = DoubleArrayRef::<char>::from_bytes_ref(black_box(&bytes)).unwrap();
         });
     });
 }
