@@ -19,20 +19,31 @@
 //! # Zero-copy deserialization
 //!
 //! The input buffer must be aligned to at least 4 bytes. Buffers from
-//! `Vec<u8>`, `mmap`, or page-aligned allocations satisfy this requirement.
+//! `mmap` or page-aligned allocations satisfy this requirement.
 //!
 //! ```
 //! use lexime_trie::{DoubleArray, DoubleArrayRef};
 //!
 //! let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
 //! let da = DoubleArray::<u8>::build(&keys);
-//! let bytes = da.as_bytes();
+//! let raw = da.as_bytes();
 //!
-//! let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(&bytes).unwrap();
+//! // Allocate a 4-byte aligned buffer (Vec<u32> guarantees this).
+//! // In production, use mmap which returns page-aligned memory.
+//! let mut backing = vec![0u32; (raw.len() + 3) / 4];
+//! let bytes: &mut [u8] = unsafe {
+//!     std::slice::from_raw_parts_mut(backing.as_mut_ptr() as *mut u8, raw.len())
+//! };
+//! bytes.copy_from_slice(&raw);
+//!
+//! let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(bytes).unwrap();
 //! assert_eq!(da_ref.exact_match(b"abc"), Some(2));
 //! ```
 
 #![warn(missing_docs)]
+
+#[cfg(not(target_endian = "little"))]
+compile_error!("lexime-trie requires a little-endian platform");
 
 mod build;
 mod code_map;
