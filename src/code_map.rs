@@ -113,34 +113,36 @@ impl CodeMapper {
         self.alphabet_size
     }
 
+    /// Returns the serialised size in bytes (without allocating).
+    #[inline]
+    pub(crate) fn serialized_size(&self) -> usize {
+        12 + (self.table.len() + self.reverse_table.len()) * 4
+    }
+
+    /// Writes the serialised CodeMapper directly into `buf`.
+    ///
+    /// This avoids the intermediate `Vec<u8>` allocation that `as_bytes()` performs.
+    pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&(self.table.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.reverse_table.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&self.alphabet_size.to_le_bytes());
+        // SAFETY: u32 has no padding; LE platform is enforced by the crate-level compile_error.
+        unsafe {
+            buf.extend_from_slice(std::slice::from_raw_parts(
+                self.table.as_ptr() as *const u8,
+                self.table.len() * 4,
+            ));
+            buf.extend_from_slice(std::slice::from_raw_parts(
+                self.reverse_table.as_ptr() as *const u8,
+                self.reverse_table.len() * 4,
+            ));
+        }
+    }
+
     /// Serializes the CodeMapper to bytes.
     pub fn as_bytes(&self) -> Vec<u8> {
-        let table_len = self.table.len() as u32;
-        let reverse_len = self.reverse_table.len() as u32;
-
-        let mut buf = Vec::with_capacity(12 + (table_len as usize + reverse_len as usize) * 4);
-        buf.extend_from_slice(&table_len.to_le_bytes());
-        buf.extend_from_slice(&reverse_len.to_le_bytes());
-        buf.extend_from_slice(&self.alphabet_size.to_le_bytes());
-
-        #[cfg(target_endian = "little")]
-        {
-            // SAFETY: u32 slices can be viewed as bytes on LE platforms.
-            let as_bytes = |s: &[u32]| unsafe {
-                std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * 4)
-            };
-            buf.extend_from_slice(as_bytes(&self.table));
-            buf.extend_from_slice(as_bytes(&self.reverse_table));
-        }
-        #[cfg(not(target_endian = "little"))]
-        {
-            for &v in &self.table {
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            for &v in &self.reverse_table {
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-        }
+        let mut buf = Vec::with_capacity(self.serialized_size());
+        self.write_to(&mut buf);
         buf
     }
 
@@ -164,46 +166,30 @@ impl CodeMapper {
 
         let mut offset = 12;
 
-        #[cfg(target_endian = "little")]
-        let table = {
-            // SAFETY: u32 has no padding; LE layout matches serialised format.
-            // with_capacity + set_len avoids redundant zero-initialisation.
+        // SAFETY: u32 has no padding; LE layout matches serialised format.
+        // with_capacity + set_len avoids redundant zero-initialisation.
+        let table = unsafe {
             let mut v = Vec::<u32>::with_capacity(table_len);
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes[offset..].as_ptr(),
-                    v.as_mut_ptr() as *mut u8,
-                    table_bytes,
-                );
-                v.set_len(table_len);
-            }
+            std::ptr::copy_nonoverlapping(
+                bytes[offset..].as_ptr(),
+                v.as_mut_ptr() as *mut u8,
+                table_bytes,
+            );
+            v.set_len(table_len);
             v
         };
-        #[cfg(not(target_endian = "little"))]
-        let table: Vec<u32> = bytes[offset..offset + table_bytes]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-            .collect();
         offset += table_bytes;
 
-        #[cfg(target_endian = "little")]
-        let reverse_table = {
+        let reverse_table = unsafe {
             let mut v = Vec::<u32>::with_capacity(reverse_len);
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes[offset..].as_ptr(),
-                    v.as_mut_ptr() as *mut u8,
-                    reverse_bytes,
-                );
-                v.set_len(reverse_len);
-            }
+            std::ptr::copy_nonoverlapping(
+                bytes[offset..].as_ptr(),
+                v.as_mut_ptr() as *mut u8,
+                reverse_bytes,
+            );
+            v.set_len(reverse_len);
             v
         };
-        #[cfg(not(target_endian = "little"))]
-        let reverse_table: Vec<u32> = bytes[offset..offset + reverse_bytes]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-            .collect();
         offset += reverse_bytes;
 
         Some((

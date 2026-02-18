@@ -1,6 +1,3 @@
-#[cfg(not(target_endian = "little"))]
-compile_error!("DoubleArrayRef zero-copy deserialization requires a little-endian platform");
-
 use std::marker::PhantomData;
 use std::mem;
 

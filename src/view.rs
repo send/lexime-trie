@@ -18,16 +18,22 @@ impl<'a, L: Label> TrieView<'a, L> {
     /// Returns the node index after consuming all labels, or None if traversal fails.
     #[inline]
     pub(crate) fn traverse(&self, key: &[L]) -> Option<u32> {
-        let mut node_idx: u32 = 0; // start at root
+        let nodes = self.nodes;
+        let len = nodes.len();
+        let mut node_idx: u32 = 0; // start at root (always valid: deserialization rejects empty nodes)
         for &label in key {
             let code = self.code_map.get(label);
             if code == 0 {
                 return None;
             }
-            let next_idx = self.nodes[node_idx as usize].base() ^ code;
-            if next_idx as usize >= self.nodes.len()
-                || self.nodes[next_idx as usize].check() != node_idx
-            {
+            // SAFETY: node_idx is a verified index — it was either 0 (root, guaranteed
+            // to exist) or set to next_idx after bounds + check validation below.
+            let next_idx = unsafe { nodes.get_unchecked(node_idx as usize) }.base() ^ code;
+            if next_idx as usize >= len {
+                return None;
+            }
+            // SAFETY: next_idx is within bounds (checked above).
+            if unsafe { nodes.get_unchecked(next_idx as usize) }.check() != node_idx {
                 return None;
             }
             node_idx = next_idx;
@@ -39,7 +45,8 @@ impl<'a, L: Label> TrieView<'a, L> {
     #[inline]
     pub(crate) fn exact_match(&self, key: &[L]) -> Option<u32> {
         let node_idx = self.traverse(key)?;
-        let node = self.nodes[node_idx as usize];
+        // SAFETY: traverse guarantees node_idx is a valid index.
+        let node = unsafe { *self.nodes.get_unchecked(node_idx as usize) };
 
         if !node.has_leaf() {
             return None;
@@ -49,7 +56,8 @@ impl<'a, L: Label> TrieView<'a, L> {
         if terminal_idx as usize >= self.nodes.len() {
             return None;
         }
-        let terminal = self.nodes[terminal_idx as usize];
+        // SAFETY: terminal_idx is within bounds (checked above).
+        let terminal = unsafe { *self.nodes.get_unchecked(terminal_idx as usize) };
         if terminal.check() == node_idx && terminal.is_leaf() {
             Some(terminal.value_id())
         } else {
@@ -149,15 +157,19 @@ pub(crate) struct CommonPrefixIter<'a, L: Label> {
 impl<L: Label> CommonPrefixIter<'_, L> {
     #[inline]
     fn check_terminal(&self) -> Option<PrefixMatch> {
-        let node = &self.view.nodes[self.node_idx as usize];
+        let nodes = self.view.nodes;
+        // SAFETY: node_idx is always a valid index (starts at root 0, advanced only
+        // after bounds + check validation in try_advance).
+        let node = unsafe { nodes.get_unchecked(self.node_idx as usize) };
         if !node.has_leaf() {
             return None;
         }
         let terminal_idx = node.base();
-        if terminal_idx as usize >= self.view.nodes.len() {
+        if terminal_idx as usize >= nodes.len() {
             return None;
         }
-        let terminal = &self.view.nodes[terminal_idx as usize];
+        // SAFETY: terminal_idx bounds-checked above.
+        let terminal = unsafe { nodes.get_unchecked(terminal_idx as usize) };
         if terminal.check() == self.node_idx && terminal.is_leaf() {
             Some(PrefixMatch {
                 len: self.pos,
@@ -178,11 +190,15 @@ impl<L: Label> CommonPrefixIter<'_, L> {
         if code == 0 {
             return false;
         }
-        let base = self.view.nodes[self.node_idx as usize].base();
+        let nodes = self.view.nodes;
+        // SAFETY: node_idx is a valid index (see check_terminal SAFETY comment).
+        let base = unsafe { nodes.get_unchecked(self.node_idx as usize) }.base();
         let next_idx = base ^ code;
-        if next_idx as usize >= self.view.nodes.len()
-            || self.view.nodes[next_idx as usize].check() != self.node_idx
-        {
+        if next_idx as usize >= nodes.len() {
+            return false;
+        }
+        // SAFETY: next_idx bounds-checked above.
+        if unsafe { nodes.get_unchecked(next_idx as usize) }.check() != self.node_idx {
             return false;
         }
         self.node_idx = next_idx;

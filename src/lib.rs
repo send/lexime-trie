@@ -34,6 +34,9 @@
 
 #![warn(missing_docs)]
 
+#[cfg(not(target_endian = "little"))]
+compile_error!("lexime-trie requires a little-endian platform");
+
 mod build;
 mod code_map;
 mod da_ref;

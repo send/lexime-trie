@@ -5,6 +5,17 @@ pub(crate) const VERSION: u8 = 2;
 /// Header: magic(4) + version(1) + reserved(3) + nodes_len(4) + siblings_len(4) + code_map_len(4) + reserved(4) = 24
 pub(crate) const HEADER_SIZE: usize = 24;
 
+/// Reinterprets a `&[T]` as `&[u8]`.
+///
+/// # Safety
+/// `T` must be `#[repr(C)]` / `#[repr(transparent)]` with no padding.
+/// The crate-level `compile_error!` guarantees we are on a little-endian platform,
+/// so the in-memory layout matches the serialised LE format.
+#[inline]
+unsafe fn as_byte_slice<T>(slice: &[T]) -> &[u8] {
+    std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice))
+}
+
 impl<L: Label> DoubleArray<L> {
     /// Serializes the double-array trie to a byte vector.
     ///
@@ -23,41 +34,29 @@ impl<L: Label> DoubleArray<L> {
     /// 24+N+S  C     code_map data
     /// ```
     pub fn as_bytes(&self) -> Vec<u8> {
-        let code_map_data = self.code_map.as_bytes();
+        // SAFETY: Node is #[repr(C)] (two u32, 8 bytes, no padding).
+        //         u32 is 4 bytes with no padding.
+        //         LE platform is enforced by the crate-level compile_error.
+        let nodes_raw = unsafe { as_byte_slice(&self.nodes) };
+        let siblings_raw = unsafe { as_byte_slice(&self.siblings) };
+        let code_map_size = self.code_map.serialized_size();
 
-        let nodes_bytes = std::mem::size_of_val(self.nodes.as_slice());
-        let siblings_bytes = self.siblings.len() * 4;
-
-        let total = HEADER_SIZE + nodes_bytes + siblings_bytes + code_map_data.len();
+        let total = HEADER_SIZE + nodes_raw.len() + siblings_raw.len() + code_map_size;
         let mut buf = Vec::with_capacity(total);
 
         // Header (24 bytes)
         buf.extend_from_slice(MAGIC);
         buf.push(VERSION);
         buf.extend_from_slice(&[0, 0, 0]); // reserved
-        buf.extend_from_slice(&(nodes_bytes as u32).to_le_bytes());
-        buf.extend_from_slice(&(siblings_bytes as u32).to_le_bytes());
-        buf.extend_from_slice(&(code_map_data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(nodes_raw.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(siblings_raw.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(code_map_size as u32).to_le_bytes());
         buf.extend_from_slice(&[0, 0, 0, 0]); // reserved
 
-        // Data sections — write directly from slices on LE, avoiding intermediate Vecs
-        #[cfg(target_endian = "little")]
-        {
-            // SAFETY: Node is #[repr(C)] (8 bytes, no padding), u32 is 4 bytes.
-            // On LE the in-memory layout is identical to the serialised format.
-            buf.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(self.nodes.as_ptr() as *const u8, nodes_bytes)
-            });
-            buf.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(self.siblings.as_ptr() as *const u8, siblings_bytes)
-            });
-        }
-        #[cfg(not(target_endian = "little"))]
-        {
-            buf.extend_from_slice(&serialize_nodes(&self.nodes));
-            buf.extend_from_slice(&serialize_u32_slice(&self.siblings));
-        }
-        buf.extend_from_slice(&code_map_data);
+        // Data sections — zero intermediate allocations
+        buf.extend_from_slice(nodes_raw);
+        buf.extend_from_slice(siblings_raw);
+        self.code_map.write_to(&mut buf);
 
         buf
     }
@@ -116,58 +115,19 @@ impl<L: Label> DoubleArray<L> {
     }
 }
 
-#[cfg(not(target_endian = "little"))]
-fn serialize_nodes(nodes: &[Node]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(nodes.len() * 8);
-    for node in nodes {
-        buf.extend_from_slice(&node.raw_base().to_le_bytes());
-        buf.extend_from_slice(&node.raw_check().to_le_bytes());
-    }
-    buf
-}
-
 fn deserialize_nodes(bytes: &[u8]) -> Option<Vec<Node>> {
     if !bytes.len().is_multiple_of(8) {
         return None;
     }
     let count = bytes.len() / std::mem::size_of::<Node>();
-    #[cfg(target_endian = "little")]
-    {
-        // SAFETY: Node is #[repr(C)], 8 bytes, no padding. LE layout matches serialised format.
-        // We use with_capacity + set_len to avoid redundant zero-initialisation.
-        let mut nodes = Vec::<Node>::with_capacity(count);
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                nodes.as_mut_ptr() as *mut u8,
-                bytes.len(),
-            );
-            nodes.set_len(count);
-        }
-        Some(nodes)
+    // SAFETY: Node is #[repr(C)], 8 bytes, no padding. LE layout matches serialised format.
+    // We use with_capacity + set_len to avoid redundant zero-initialisation.
+    let mut nodes = Vec::<Node>::with_capacity(count);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), nodes.as_mut_ptr() as *mut u8, bytes.len());
+        nodes.set_len(count);
     }
-    #[cfg(not(target_endian = "little"))]
-    {
-        Some(
-            bytes
-                .chunks_exact(8)
-                .map(|chunk| {
-                    let base = u32::from_le_bytes(chunk[..4].try_into().unwrap());
-                    let check = u32::from_le_bytes(chunk[4..].try_into().unwrap());
-                    Node::from_raw(base, check)
-                })
-                .collect(),
-        )
-    }
-}
-
-#[cfg(not(target_endian = "little"))]
-fn serialize_u32_slice(data: &[u32]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(data.len() * 4);
-    for &v in data {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    buf
+    Some(nodes)
 }
 
 fn deserialize_u32_slice(bytes: &[u8]) -> Option<Vec<u32>> {
@@ -175,26 +135,13 @@ fn deserialize_u32_slice(bytes: &[u8]) -> Option<Vec<u32>> {
         return None;
     }
     let count = bytes.len() / 4;
-    #[cfg(target_endian = "little")]
-    {
-        // SAFETY: u32 is 4 bytes with no padding. LE layout matches serialised format.
-        // We use with_capacity + set_len to avoid redundant zero-initialisation.
-        let mut out = Vec::<u32>::with_capacity(count);
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr() as *mut u8, bytes.len());
-            out.set_len(count);
-        }
-        Some(out)
+    // SAFETY: u32 is 4 bytes with no padding. LE layout matches serialised format.
+    let mut out = Vec::<u32>::with_capacity(count);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr() as *mut u8, bytes.len());
+        out.set_len(count);
     }
-    #[cfg(not(target_endian = "little"))]
-    {
-        Some(
-            bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-                .collect(),
-        )
-    }
+    Some(out)
 }
 
 #[cfg(test)]
