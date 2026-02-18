@@ -91,6 +91,16 @@ impl<L: Label> DoubleArray<L> {
         let (code_map, _consumed) = CodeMapper::from_bytes(&bytes[offset..offset + code_map_len])
             .ok_or(TrieError::TruncatedData)?;
 
+        // Search logic assumes a root node at index 0
+        if nodes.is_empty() {
+            return Err(TrieError::TruncatedData);
+        }
+
+        // nodes and siblings must be parallel arrays of equal length
+        if siblings.len() != nodes.len() {
+            return Err(TrieError::TruncatedData);
+        }
+
         Ok(Self::new(nodes, siblings, code_map))
     }
 }

@@ -56,6 +56,8 @@ let da2 = DoubleArray::<u8>::from_bytes(&bytes).unwrap();
 
 ### Zero-copy deserialization
 
+The input buffer must be aligned to at least 4 bytes. Buffers from `Vec<u8>`, `mmap`, or page-aligned allocations satisfy this requirement.
+
 ```rust
 use lexime_trie::{DoubleArray, DoubleArrayRef};
 

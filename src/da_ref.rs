@@ -66,17 +66,27 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
         }
 
         // Validate nodes section
-        if !nodes_len.is_multiple_of(8) {
+        if !nodes_len.is_multiple_of(mem::size_of::<Node>()) {
             return Err(TrieError::TruncatedData);
         }
 
         // Validate siblings section
-        if !siblings_len.is_multiple_of(4) {
+        if !siblings_len.is_multiple_of(mem::size_of::<u32>()) {
             return Err(TrieError::TruncatedData);
         }
 
         let node_count = nodes_len / mem::size_of::<Node>();
         let sibling_count = siblings_len / mem::size_of::<u32>();
+
+        // Search logic assumes a root node at index 0
+        if node_count == 0 {
+            return Err(TrieError::TruncatedData);
+        }
+
+        // nodes and siblings must be parallel arrays of equal length
+        if sibling_count != node_count {
+            return Err(TrieError::TruncatedData);
+        }
 
         let nodes_ptr = bytes[HEADER_SIZE..].as_ptr();
         let siblings_ptr = bytes[HEADER_SIZE + nodes_len..].as_ptr();

@@ -278,7 +278,7 @@ Offset  Size  Content
 24+N+S  C     code_map data
 ```
 
-- The 24-byte header ensures `nodes` data starts at an 8-byte boundary (required for zero-copy)
+- The 24-byte header ensures `nodes` data starts at an 8-byte boundary (exceeds the 4-byte alignment required by `Node`/`u32`)
 - Three sections: `nodes`, `siblings`, `code_map`
 - Raw `#[repr(C)]` data (serialized as little-endian)
 - Copy-load: ~5ms, runs once at app startup
@@ -297,7 +297,7 @@ pub struct DoubleArrayRef<'a, L: Label> {
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// Zero-copy deserialization from a byte slice (v2 format only).
-    /// The buffer must be aligned to at least 8 bytes.
+    /// The buffer must be aligned to at least 4 bytes (for `Node` and `u32` access).
     pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError>;
 
     /// All search methods: exact_match, common_prefix_search,

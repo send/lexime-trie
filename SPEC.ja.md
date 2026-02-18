@@ -279,7 +279,7 @@ Offset  Size  内容
 24+N+S  C     code_map データ
 ```
 
-- 24 バイトヘッダにより `nodes` データは 8 バイト境界から開始 (zero-copy に必要)
+- 24 バイトヘッダにより `nodes` データは 8 バイト境界から開始 (`Node`/`u32` に必要な 4 バイトアライメントを超過)
 - セクション: `nodes`, `siblings`, `code_map` の 3 つ
 - バイト列は `#[repr(C)]` の生データ (little-endian で serialize)
 - コピーロード: ~5ms。アプリ起動時 1 回のみ
@@ -298,7 +298,7 @@ pub struct DoubleArrayRef<'a, L: Label> {
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// バイト列から zero-copy でデシリアライズ (v2 フォーマットのみ)。
-    /// バッファは 8 バイト以上のアライメントが必要。
+    /// バッファは 4 バイト以上のアライメントが必要 (`Node` および `u32` アクセスのため)。
     pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError>;
 
     /// 全検索メソッド: exact_match, common_prefix_search,
