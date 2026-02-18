@@ -167,6 +167,11 @@ mod tests {
     }
 
     #[test]
+    fn node_alignment_is_4() {
+        assert_eq!(mem::align_of::<Node>(), 4);
+    }
+
+    #[test]
     fn max_values() {
         let mut n = Node::default();
         n.set_base(MASK);

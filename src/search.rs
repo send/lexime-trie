@@ -1,3 +1,6 @@
+use std::marker::PhantomData;
+
+use crate::view::TrieView;
 use crate::{DoubleArray, Label};
 
 /// Result of a common prefix search match.
@@ -28,50 +31,21 @@ pub struct ProbeResult {
 }
 
 impl<L: Label> DoubleArray<L> {
-    /// Traverses the trie from the root following the given key labels.
-    /// Returns the node index after consuming all labels, or None if traversal fails.
+    /// Returns a `TrieView` borrowing this trie's data.
     #[inline]
-    fn traverse(&self, key: &[L]) -> Option<u32> {
-        let mut node_idx: u32 = 0; // start at root
-        for &label in key {
-            let code = self.code_map.get(label);
-            if code == 0 {
-                // Unmapped label — cannot exist in trie
-                return None;
-            }
-            let next_idx = self.nodes[node_idx as usize].base() ^ code;
-            if next_idx as usize >= self.nodes.len()
-                || self.nodes[next_idx as usize].check() != node_idx
-            {
-                return None;
-            }
-            node_idx = next_idx;
+    fn view(&self) -> TrieView<'_, L> {
+        TrieView {
+            nodes: &self.nodes,
+            siblings: &self.siblings,
+            code_map: &self.code_map,
+            _phantom: PhantomData,
         }
-        Some(node_idx)
     }
 
     /// Exact match search. Returns the value_id if the key exists.
     #[inline]
     pub fn exact_match(&self, key: &[L]) -> Option<u32> {
-        let node_idx = self.traverse(key)?;
-        let node = self.nodes[node_idx as usize];
-
-        // Fast path: check has_leaf flag before probing terminal child
-        if !node.has_leaf() {
-            return None;
-        }
-
-        // Check terminal child: base XOR terminal_code where terminal_code = 0
-        let terminal_idx = node.base();
-        if terminal_idx as usize >= self.nodes.len() {
-            return None;
-        }
-        let terminal = self.nodes[terminal_idx as usize];
-        if terminal.check() == node_idx && terminal.is_leaf() {
-            Some(terminal.value_id())
-        } else {
-            None
-        }
+        self.view().exact_match(key)
     }
 
     /// Common prefix search. Returns an iterator over all prefixes of `query`
@@ -80,13 +54,7 @@ impl<L: Label> DoubleArray<L> {
         &'a self,
         query: &'a [L],
     ) -> impl Iterator<Item = PrefixMatch> + 'a {
-        CommonPrefixIter {
-            da: self,
-            query,
-            pos: 0,
-            node_idx: 0,
-            done: false,
-        }
+        self.view().common_prefix_search(query)
     }
 
     /// Predictive search. Returns an iterator over all keys that start with `prefix`.
@@ -97,30 +65,7 @@ impl<L: Label> DoubleArray<L> {
         &'a self,
         prefix: &'a [L],
     ) -> impl Iterator<Item = SearchMatch<L>> + 'a {
-        PredictiveIter::new(self, prefix)
-    }
-
-    /// Finds the first child of `node_idx`.
-    /// Checks the terminal child (code 0) first, then scans non-terminal codes.
-    #[inline]
-    fn first_child(&self, node_idx: u32) -> Option<u32> {
-        let base = self.nodes[node_idx as usize].base();
-        // Terminal child is at base XOR 0 = base (skip self-reference for root with base=0)
-        let terminal_idx = base;
-        if terminal_idx != node_idx
-            && (terminal_idx as usize) < self.nodes.len()
-            && self.nodes[terminal_idx as usize].check() == node_idx
-        {
-            return Some(terminal_idx);
-        }
-        // No terminal child — scan non-terminal codes to find the first child
-        for code in 1..self.code_map.alphabet_size() {
-            let idx = base ^ code;
-            if (idx as usize) < self.nodes.len() && self.nodes[idx as usize].check() == node_idx {
-                return Some(idx);
-            }
-        }
-        None
+        self.view().predictive_search(prefix)
     }
 
     /// Probe a key. Returns whether the key exists and whether it has children.
@@ -132,204 +77,7 @@ impl<L: Label> DoubleArray<L> {
     /// - `ExactAndPrefix`: key exists and is also a prefix of other keys
     #[inline]
     pub fn probe(&self, key: &[L]) -> ProbeResult {
-        let node_idx = match self.traverse(key) {
-            Some(idx) => idx,
-            None => {
-                return ProbeResult {
-                    value: None,
-                    has_children: false,
-                }
-            }
-        };
-
-        let base = self.nodes[node_idx as usize].base();
-
-        // Check terminal child: base XOR 0 = base
-        let terminal_idx = base;
-        if (terminal_idx as usize) < self.nodes.len() {
-            let terminal = self.nodes[terminal_idx as usize];
-            if terminal.check() == node_idx && terminal.is_leaf() {
-                // Terminal child exists — key is in the trie
-                let has_children = self.siblings[terminal_idx as usize] != 0;
-                return ProbeResult {
-                    value: Some(terminal.value_id()),
-                    has_children,
-                };
-            }
-        }
-
-        // No terminal child — key is not in the trie.
-        // Check if the node actually has children (could be root of empty trie).
-        let has_children = self.first_child(node_idx).is_some();
-        ProbeResult {
-            value: None,
-            has_children,
-        }
-    }
-}
-
-struct CommonPrefixIter<'a, L: Label> {
-    da: &'a DoubleArray<L>,
-    query: &'a [L],
-    pos: usize,
-    node_idx: u32,
-    done: bool,
-}
-
-impl<L: Label> CommonPrefixIter<'_, L> {
-    /// Checks if the current node has a terminal child and returns the match.
-    #[inline]
-    fn check_terminal(&self) -> Option<PrefixMatch> {
-        let node = &self.da.nodes[self.node_idx as usize];
-        if !node.has_leaf() {
-            return None;
-        }
-        let terminal_idx = node.base();
-        if terminal_idx as usize >= self.da.nodes.len() {
-            return None;
-        }
-        let terminal = &self.da.nodes[terminal_idx as usize];
-        if terminal.check() == self.node_idx && terminal.is_leaf() {
-            Some(PrefixMatch {
-                len: self.pos,
-                value_id: terminal.value_id(),
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Tries to advance to the next query position. Returns false if unable.
-    #[inline]
-    fn try_advance(&mut self) -> bool {
-        if self.pos >= self.query.len() {
-            return false;
-        }
-        let label = self.query[self.pos];
-        let code = self.da.code_map.get(label);
-        if code == 0 {
-            return false;
-        }
-        let base = self.da.nodes[self.node_idx as usize].base();
-        let next_idx = base ^ code;
-        if next_idx as usize >= self.da.nodes.len()
-            || self.da.nodes[next_idx as usize].check() != self.node_idx
-        {
-            return false;
-        }
-        self.node_idx = next_idx;
-        self.pos += 1;
-        true
-    }
-}
-
-impl<L: Label> Iterator for CommonPrefixIter<'_, L> {
-    type Item = PrefixMatch;
-
-    fn next(&mut self) -> Option<PrefixMatch> {
-        while !self.done {
-            let result = self.check_terminal();
-            if !self.try_advance() {
-                self.done = true;
-            }
-            if result.is_some() {
-                return result;
-            }
-        }
-        None
-    }
-}
-
-struct PredictiveIter<'a, L: Label> {
-    da: &'a DoubleArray<L>,
-    // Stack of (node_index, key_so_far) for DFS
-    stack: Vec<(u32, Vec<L>)>,
-}
-
-impl<'a, L: Label> PredictiveIter<'a, L> {
-    fn new(da: &'a DoubleArray<L>, prefix: &[L]) -> Self {
-        let mut iter = PredictiveIter {
-            da,
-            stack: Vec::new(),
-        };
-
-        // Traverse prefix to find starting node
-        if let Some(start_node) = da.traverse(prefix) {
-            let prefix_labels: Vec<L> = prefix.to_vec();
-            iter.stack.push((start_node, prefix_labels));
-        }
-
-        iter
-    }
-}
-
-impl<'a, L: Label> Iterator for PredictiveIter<'a, L> {
-    type Item = SearchMatch<L>;
-
-    fn next(&mut self) -> Option<SearchMatch<L>> {
-        while let Some((node_idx, key)) = self.stack.pop() {
-            let node = &self.da.nodes[node_idx as usize];
-            let base = node.base();
-
-            // Collect children via the first child + sibling chain
-            // We process children in reverse order so the stack pops in forward order
-            let mut children: Vec<(u32, bool)> = Vec::new(); // (child_idx, is_terminal)
-
-            // Check terminal child first (code 0): base XOR 0 = base
-            let terminal_idx = base;
-            if (terminal_idx as usize) < self.da.nodes.len()
-                && self.da.nodes[terminal_idx as usize].check() == node_idx
-            {
-                children.push((terminal_idx, true));
-
-                // Follow sibling chain from terminal
-                let mut sib = self.da.siblings[terminal_idx as usize];
-                while sib != 0 {
-                    children.push((sib, false));
-                    sib = self.da.siblings[sib as usize];
-                }
-            } else {
-                // No terminal child — find first non-terminal child
-                if let Some(first) = self.da.first_child(node_idx) {
-                    children.push((first, false));
-                    let mut sib = self.da.siblings[first as usize];
-                    while sib != 0 {
-                        children.push((sib, false));
-                        sib = self.da.siblings[sib as usize];
-                    }
-                }
-            }
-
-            // Push non-terminal children onto stack in reverse order (for DFS ordering)
-            // and collect any terminal matches
-            let mut result: Option<SearchMatch<L>> = None;
-
-            for &(child_idx, is_terminal) in children.iter().rev() {
-                if is_terminal {
-                    let child = &self.da.nodes[child_idx as usize];
-                    if child.is_leaf() {
-                        result = Some(SearchMatch {
-                            key: key.clone(),
-                            value_id: child.value_id(),
-                        });
-                    }
-                } else {
-                    // Reconstruct the label for this child from its code
-                    let child_code = base ^ child_idx;
-                    let label_u32 = self.da.code_map.reverse(child_code);
-                    if let Ok(label) = L::try_from(label_u32) {
-                        let mut child_key = key.clone();
-                        child_key.push(label);
-                        self.stack.push((child_idx, child_key));
-                    }
-                }
-            }
-
-            if let Some(r) = result {
-                return Some(r);
-            }
-        }
-        None
+        self.view().probe(key)
     }
 }
 

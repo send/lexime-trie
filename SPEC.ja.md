@@ -251,11 +251,11 @@ pub struct ProbeResult {
 }
 ```
 
-### シリアライズ
+### シリアライズ (LXTR v2)
 
 ```rust
 impl<L: Label> DoubleArray<L> {
-    /// 内部データの生バイト表現を返す。
+    /// 内部データの生バイト表現を返す (v2 フォーマット)。
     pub fn as_bytes(&self) -> Vec<u8>;
 
     /// 生バイト列から DoubleArray を復元する (コピー)。
@@ -263,14 +263,75 @@ impl<L: Label> DoubleArray<L> {
 }
 ```
 
-- lexime-trie 独自ヘッダ: magic (`LXTR`) + version (1) + 各セクションの長さ
+**v2 バイナリフォーマット** (24 バイトヘッダ、8 バイトアライメント):
+
+```
+Offset  Size  内容
+0       4     Magic: "LXTR"
+4       1     Version: 0x02
+5       3     予約: [0, 0, 0]
+8       4     nodes_len (u32 LE, バイト数)
+12      4     siblings_len (u32 LE, バイト数)
+16      4     code_map_len (u32 LE, バイト数)
+20      4     予約: [0, 0, 0, 0]
+24      N     nodes データ (各ノード: base LE u32 + check LE u32)
+24+N    S     siblings データ (各: u32 LE)
+24+N+S  C     code_map データ
+```
+
+- 24 バイトヘッダにより `nodes` データは 8 バイト境界から開始 (`Node`/`u32` に必要な 4 バイトアライメントを超過)
 - セクション: `nodes`, `siblings`, `code_map` の 3 つ
 - バイト列は `#[repr(C)]` の生データ (little-endian で serialize)
 - コピーロード: ~5ms。アプリ起動時 1 回のみ
-- 内部の検索ロジックは `&[Node]` に対して実装するため、
-  将来 zero-copy (`DoubleArrayRef<'a>`) の追加は後方互換で可能
 - **エンディアン**: シリアライズは little-endian (`to_le_bytes` / `from_le_bytes`) で正規化済み。
   クロスプラットフォームで互換性あり
+
+### Zero-Copy デシリアライズ
+
+```rust
+pub struct DoubleArrayRef<'a, L: Label> {
+    nodes: &'a [Node],       // バイトバッファから借用
+    siblings: &'a [u32],     // バイトバッファから借用
+    code_map: CodeMapper,    // 常にヒープ確保 (小さいため)
+    _phantom: PhantomData<L>,
+}
+
+impl<'a, L: Label> DoubleArrayRef<'a, L> {
+    /// バイト列から zero-copy でデシリアライズ (v2 フォーマットのみ)。
+    /// バッファは 4 バイト以上のアライメントが必要 (`Node` および `u32` アクセスのため)。
+    pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError>;
+
+    /// 全検索メソッド: exact_match, common_prefix_search,
+    /// predictive_search, probe — DoubleArray と同一の API。
+
+    /// nodes/siblings をヒープにコピーして owned な DoubleArray に変換する。
+    pub fn to_owned(&self) -> DoubleArray<L>;
+}
+```
+
+- `nodes` と `siblings` は `unsafe` ポインタキャストでバイトバッファから直接借用
+- 安全性の根拠: `Node` が `#[repr(C)]` (8B, align 4, パディングなし)、
+  実行時アライメント検証、LE ターゲット前提 (x86_64/aarch64)
+- `code_map` はシリアライズ形式からの復元が必要なため常にヒープにデシリアライズ (小さいため問題なし)
+- `from_bytes_ref` は LXTR v2 フォーマット (24 バイトアライメント済みヘッダ) が必要
+- 典型的な使い方: ファイルを mmap して `from_bytes_ref` に渡す
+
+### 検索ロジック共有 (TrieView)
+
+全検索メソッド (`traverse`, `exact_match`, `common_prefix_search`, `predictive_search`,
+`first_child`, `probe`) は `TrieView<'a, L>` に一元実装:
+
+```rust
+#[derive(Clone, Copy)]
+pub(crate) struct TrieView<'a, L: Label> {
+    nodes: &'a [Node],
+    siblings: &'a [u32],
+    code_map: &'a CodeMapper,
+    _phantom: PhantomData<L>,
+}
+```
+
+`DoubleArray` と `DoubleArrayRef` の両方が `TrieView` に委譲し、コード重複ゼロを実現。
 
 ### エラー型
 
@@ -282,6 +343,8 @@ pub enum TrieError {
     InvalidVersion,
     /// バイナリデータが切り詰められている・破損している
     TruncatedData,
+    /// バイトバッファのアライメントが不正 (zero-copy アクセス不可)
+    MisalignedData,
 }
 ```
 
@@ -359,8 +422,10 @@ lexime/
 │       ├── node.rs        Node (base + check, 8B)
 │       ├── code_map.rs    CodeMapper (頻度順ラベル再マッピング)
 │       ├── build.rs       DoubleArray::build() + sibling chain 構築
-│       ├── search.rs      exact_match, common_prefix_search, predictive_search, probe
-│       └── serial.rs      as_bytes, from_bytes
+│       ├── search.rs      検索メソッドの TrieView 委譲
+│       ├── serial.rs      as_bytes, from_bytes
+│       ├── view.rs        TrieView — 共有検索ロジック (exact_match, common_prefix_search 等)
+│       └── da_ref.rs      DoubleArrayRef — zero-copy デシリアライズ
 ├── engine/                ← 既存クレート (lexime-trie に依存)
 │   └── Cargo.toml         trie-rs, serde, bincode を削除 → lexime-trie を追加
 └── Cargo.toml             ← workspace 化
@@ -370,8 +435,6 @@ lexime/
 
 - **挿入・削除の動的操作はサポートしない**。ビルド済みの不変 Trie のみ
 - **圧縮 (TAIL 圧縮、MpTrie 等) は初期実装に含めない**。必要になったら追加
-- **mmap zero-copy は初期実装に含めない**。コピーロード (~5ms) で十分高速。
-  内部を `&[Node]` で書いておくことで、後から `DoubleArrayRef<'a>` を追加可能
 
 ## 実装状況
 
@@ -381,5 +444,6 @@ lexime/
 4. **common_prefix_search** — ラティス構築に必要 ✅
 5. **predictive_search** — 予測候補に必要 (sibling chain 利用) ✅
 6. **probe** — ローマ字 Trie に必要 ✅
-7. **as_bytes / from_bytes** — シリアライズ ✅
-8. **lexime 統合** — TrieDictionary と RomajiTrie の内部を差し替え
+7. **as_bytes / from_bytes** — シリアライズ (LXTR v2 フォーマット) ✅
+8. **DoubleArrayRef / from_bytes_ref** — zero-copy mmap デシリアライズ ✅
+9. **lexime 統合** — TrieDictionary と RomajiTrie の内部を差し替え
