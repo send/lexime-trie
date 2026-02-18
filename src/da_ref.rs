@@ -83,15 +83,11 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
 
         // Check alignment only when sections are non-empty, because
         // as_ptr() on an empty sub-slice may return a dangling pointer.
-        if node_count > 0
-            && !(nodes_ptr as usize).is_multiple_of(mem::align_of::<Node>())
-        {
+        if node_count > 0 && !(nodes_ptr as usize).is_multiple_of(mem::align_of::<Node>()) {
             return Err(TrieError::MisalignedData);
         }
 
-        if sibling_count > 0
-            && !(siblings_ptr as usize).is_multiple_of(mem::align_of::<u32>())
-        {
+        if sibling_count > 0 && !(siblings_ptr as usize).is_multiple_of(mem::align_of::<u32>()) {
             return Err(TrieError::MisalignedData);
         }
 
