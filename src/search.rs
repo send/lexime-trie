@@ -298,6 +298,82 @@ mod tests {
     }
 
     #[test]
+    // Builds a 35k-key trie, which takes >15 min under Miri. The smaller
+    // `predictive_search_root_many_children` test covers the same bug, so
+    // there's no value in paying for this one under Miri.
+    #[cfg_attr(miri, ignore)]
+    fn predictive_search_emits_every_key_at_scale() {
+        // Regression: on large tries, predictive_search(b"") silently dropped
+        // ~30% of keys even though exact_match still worked. Reproduces with
+        // a systematic key set that stresses the sibling-chain walk.
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        for a in b'a'..=b'z' {
+            for b in b'a'..=b'z' {
+                for c in b'a'..=b'z' {
+                    keys.push(vec![a, b, c]);
+                    keys.push(vec![a, b, c, b'x']);
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let da = DoubleArray::<u8>::build(&key_refs);
+
+        // Every key must be reachable via exact_match (sanity check).
+        for k in &keys {
+            assert!(da.exact_match(k).is_some(), "exact_match lost {k:?}");
+        }
+
+        let mut emitted: Vec<Vec<u8>> = da.predictive_search(b"").map(|m| m.key).collect();
+        emitted.sort();
+        assert_eq!(emitted, keys, "iter must emit every key");
+    }
+
+    #[test]
+    fn predictive_search_small_terminal_and_children() {
+        // Minimal case: each node has BOTH a terminal (value at this node) AND
+        // extension children. E.g. "ab", "ab" + "abc".
+        let keys: Vec<&[u8]> = vec![b"ab", b"abc"];
+        let da = DoubleArray::<u8>::build(&keys);
+        let mut v: Vec<Vec<u8>> = da.predictive_search(b"").map(|m| m.key).collect();
+        v.sort();
+        assert_eq!(v, vec![b"ab".to_vec(), b"abc".to_vec()]);
+    }
+
+    #[test]
+    fn predictive_search_root_many_children() {
+        // Regression: with 26 root children where the highest-frequency label
+        // is not also the byte-smallest, the sibling chain previously skipped
+        // ~90% of subtrees because children were placed in byte order while
+        // first_child iterates by code order.
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        for a in b'a'..=b'z' {
+            keys.push(vec![a]);
+            keys.push(vec![a, b'x']);
+        }
+        keys.sort();
+        let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let da = DoubleArray::<u8>::build(&refs);
+        let count = da.predictive_search(b"").count();
+        assert_eq!(count, keys.len());
+    }
+
+    #[test]
+    fn predictive_search_terminal_plus_many_children() {
+        // Node "a" has a value AND 10 extension children.
+        let mut keys: Vec<Vec<u8>> = vec![b"a".to_vec()];
+        for c in b'0'..=b'9' {
+            keys.push(vec![b'a', c]);
+        }
+        keys.sort();
+        let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let da = DoubleArray::<u8>::build(&refs);
+        let count = da.predictive_search(b"").count();
+        assert_eq!(count, keys.len());
+    }
+
+    #[test]
     fn predictive_search_char_keys() {
         let da = build_char(&["あ", "あい", "あいう", "か"]);
         let prefix: Vec<char> = "あ".chars().collect();

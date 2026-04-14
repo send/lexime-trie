@@ -121,8 +121,12 @@ impl BuildContext {
         depth: usize,
         parent: u32,
     ) {
-        // Collect distinct child labels and their key ranges
-        let mut children: Vec<(u32, usize, usize)> = Vec::new(); // (code, begin, end)
+        // Collect distinct child labels and their key ranges. Keys arrive in
+        // byte-sorted order, but codes are frequency-assigned — so byte order
+        // and code order can disagree. Sibling chains are walked in code
+        // order (first_child starts at code 1), so we must also place children
+        // in code order to keep the chain consistent with that traversal.
+        let mut children: Vec<(u32, usize, usize)> = Vec::new();
         let mut i = begin;
         while i < end {
             let code = coded_keys[i][depth];
@@ -133,6 +137,7 @@ impl BuildContext {
             }
             children.push((code, child_begin, i));
         }
+        children.sort_unstable_by_key(|&(code, _, _)| code);
 
         // Find a base such that base XOR code is free for all children
         let base = self.find_base(&children);

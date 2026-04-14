@@ -101,11 +101,17 @@ impl<'a, L: Label> TrieView<'a, L> {
     /// Finds the first child of `node_idx`.
     #[inline]
     fn first_child(&self, node_idx: u32) -> Option<u32> {
-        let base = self.nodes[node_idx as usize].base();
+        let node = self.nodes[node_idx as usize];
+        let base = node.base();
+        // Require the `has_leaf` flag before reading the terminal slot. For
+        // node_idx == 0 (root), an uninitialised slot defaults to check=0 and
+        // would otherwise be misidentified as a terminal child of the root.
         let terminal_idx = base;
-        if terminal_idx != node_idx
+        if node.has_leaf()
+            && terminal_idx != node_idx
             && (terminal_idx as usize) < self.nodes.len()
             && self.nodes[terminal_idx as usize].check() == node_idx
+            && self.nodes[terminal_idx as usize].is_leaf()
         {
             return Some(terminal_idx);
         }
@@ -262,10 +268,18 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
 
             self.children_buf.clear();
 
+            // A node has a terminal child iff it carries the `has_leaf` flag.
+            // Relying on `nodes[base].check() == node_idx` alone is unsafe for
+            // the root (node_idx=0), because an uninitialised slot defaults to
+            // check=0 and would falsely match — yielding a phantom terminal
+            // whose bogus sibling chain then masks the real children.
             let terminal_idx = base;
-            if (terminal_idx as usize) < node_count
+            let has_real_terminal = node.has_leaf()
+                && (terminal_idx as usize) < node_count
                 && self.view.nodes[terminal_idx as usize].check() == node_idx
-            {
+                && self.view.nodes[terminal_idx as usize].is_leaf();
+
+            if has_real_terminal {
                 self.children_buf.push((terminal_idx, true));
 
                 let mut sib = self.view.siblings[terminal_idx as usize];
