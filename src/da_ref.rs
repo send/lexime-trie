@@ -75,8 +75,9 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
         let node_count = nodes_len / mem::size_of::<Node>();
         let sibling_count = siblings_len / mem::size_of::<u32>();
 
-        // Search logic assumes a root node at index 0
-        if node_count == 0 {
+        // Search assumes nodes[0] = sentinel and nodes[1] = root, so the
+        // array must have at least 2 entries.
+        if node_count < 2 {
             return Err(TrieError::TruncatedData);
         }
 
@@ -201,7 +202,7 @@ mod tests {
 
     impl AlignedBuffer {
         fn new(bytes: &[u8]) -> Self {
-            let n = (bytes.len() + 7) / 8;
+            let n = bytes.len().div_ceil(8);
             let mut backing = vec![0u64; n];
             // SAFETY: copying bytes into a u64 buffer; u64 has no invalid bit patterns.
             unsafe {
@@ -323,7 +324,7 @@ mod tests {
         // Allocate a buffer with extra room, using Vec<u64> for guaranteed
         // 8-byte base alignment. We write into this buffer directly so the
         // offset calculation matches the actual slice being tested.
-        let mut backing = vec![0u64; (bytes.len() + 16 + 7) / 8];
+        let mut backing = vec![0u64; (bytes.len() + 16).div_ceil(8)];
         let buf = unsafe {
             std::slice::from_raw_parts_mut(backing.as_mut_ptr() as *mut u8, backing.len() * 8)
         };
@@ -333,7 +334,7 @@ mod tests {
         // Since 24 % 4 == 0, we need (base + offset) % 4 != 0.
         // At least 3 of offsets 0..4 satisfy this.
         let offset = (0..4)
-            .find(|&o| (base + o + 24) % 4 != 0)
+            .find(|&o| !(base + o + 24).is_multiple_of(4))
             .expect("at least one offset should be misaligned");
 
         buf[offset..offset + bytes.len()].copy_from_slice(&bytes);

@@ -95,7 +95,10 @@ impl FreeList {
 impl BuildContext {
     fn new(capacity: usize) -> Self {
         let mut free_list = FreeList::new(capacity);
-        free_list.remove(0); // root is at index 0
+        // nodes[0] is the invalid sentinel, nodes[1] is the root.
+        // Neither is ever used as a child slot, so both are removed up front.
+        free_list.remove(0);
+        free_list.remove(1);
         Self {
             nodes: vec![Node::default(); capacity],
             siblings: vec![0u32; capacity],
@@ -192,28 +195,30 @@ impl BuildContext {
         loop {
             let base = cursor ^ first_code;
 
-            // base must not be 0 (reserved for root check semantics)
-            if base != 0 {
-                // Compute max child index to ensure capacity
-                let max_idx = children
-                    .iter()
-                    .map(|&(code, _, _)| base ^ code)
-                    .max()
-                    .unwrap();
+            // base == 0 or base == 1 would place children at sentinel/root
+            // slots, but those are not in the free list, so the all_free
+            // check below naturally rejects such bases. No explicit guard
+            // needed.
 
-                // Ensure capacity
-                if max_idx as usize >= self.nodes.len() {
-                    let new_cap = (max_idx as usize + 1).next_power_of_two();
-                    self.ensure_capacity(new_cap);
-                }
+            // Compute max child index to ensure capacity
+            let max_idx = children
+                .iter()
+                .map(|&(code, _, _)| base ^ code)
+                .max()
+                .unwrap();
 
-                let all_free = children
-                    .iter()
-                    .all(|&(code, _, _)| self.free_list.is_free(base ^ code));
+            // Ensure capacity
+            if max_idx as usize >= self.nodes.len() {
+                let new_cap = (max_idx as usize + 1).next_power_of_two();
+                self.ensure_capacity(new_cap);
+            }
 
-                if all_free {
-                    return base;
-                }
+            let all_free = children
+                .iter()
+                .all(|&(code, _, _)| self.free_list.is_free(base ^ code));
+
+            if all_free {
+                return base;
             }
 
             // Advance cursor to the next free slot
@@ -251,7 +256,12 @@ impl<L: Label> DoubleArray<L> {
 
         if keys.is_empty() {
             let empty: &[Vec<L>] = &[];
-            return Self::new(vec![Node::default()], vec![0], CodeMapper::build(empty));
+            // [sentinel, empty root]
+            return Self::new(
+                vec![Node::default(), Node::default()],
+                vec![0, 0],
+                CodeMapper::build(empty),
+            );
         }
 
         let code_map = CodeMapper::build(keys);
@@ -269,9 +279,12 @@ impl<L: Label> DoubleArray<L> {
         let initial_cap = 256.max(coded_keys.len() * 4);
         let mut ctx = BuildContext::new(initial_cap);
 
-        ctx.build_rec(&coded_keys, 0, keys.len(), 0, 0);
+        // Root lives at index 1; index 0 is the invalid sentinel.
+        ctx.build_rec(&coded_keys, 0, keys.len(), 0, 1);
 
-        // Trim trailing unused nodes
+        // Trim trailing unused nodes. Always keep at least [sentinel, root]
+        // even if the root happens to have base=0 (which makes the root node
+        // indistinguishable from Node::default() by value).
         let last_used = ctx
             .nodes
             .iter()
@@ -279,8 +292,8 @@ impl<L: Label> DoubleArray<L> {
             .rev()
             .find(|(_, n)| *n != &Node::default())
             .map(|(i, _)| i)
-            .unwrap_or(0);
-        let final_len = last_used + 1;
+            .unwrap_or(1);
+        let final_len = (last_used + 1).max(2);
         ctx.nodes.truncate(final_len);
         ctx.siblings.truncate(final_len);
 
@@ -382,14 +395,55 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_is_default_after_build() {
+        // nodes[0] must always be the default sentinel.
+        let cases: Vec<Vec<&[u8]>> = vec![
+            vec![],
+            vec![b"a"],
+            vec![b"a", b"ab", b"abc"],
+            vec![b"n", b"na", b"ni", b"nu", b"shi"],
+        ];
+        for keys in cases {
+            let da = DoubleArray::<u8>::build(&keys);
+            assert_eq!(
+                da.nodes[0],
+                Node::default(),
+                "nodes[0] must be default sentinel (keys={keys:?})"
+            );
+            assert!(
+                da.nodes.len() >= 2,
+                "must have at least [sentinel, root] (keys={keys:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn no_node_has_sentinel_as_parent() {
+        // No non-sentinel, non-root node should have check() == 0.
+        // (Root has check=0 by convention, but it is at index 1, not 0.)
+        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc", b"n", b"na"];
+        let da = DoubleArray::<u8>::build(&keys);
+        for (i, node) in da.nodes.iter().enumerate() {
+            if i <= 1 || *node == Node::default() {
+                continue;
+            }
+            assert_ne!(
+                node.check(),
+                0,
+                "node {i} has check()=0 but is neither sentinel nor root"
+            );
+        }
+    }
+
+    #[test]
     fn sibling_chain_links_same_parent() {
         let da = DoubleArray::<u8>::build(&[b"ab", b"ac", b"ad"]);
 
-        // Find node for 'a' from root
-        let root_base = da.nodes[0].base();
+        // Find node for 'a' from root (root is at nodes[1])
+        let root_base = da.nodes[1].base();
         let code_a = da.code_map.get(b'a');
         let node_a_idx = root_base ^ code_a;
-        assert_eq!(da.nodes[node_a_idx as usize].check(), 0);
+        assert_eq!(da.nodes[node_a_idx as usize].check(), 1);
 
         // Count children of node_a via sibling chain
         let a_base = da.nodes[node_a_idx as usize].base();

@@ -20,7 +20,9 @@ impl<'a, L: Label> TrieView<'a, L> {
     pub(crate) fn traverse(&self, key: &[L]) -> Option<u32> {
         let nodes = self.nodes;
         let len = nodes.len();
-        let mut node_idx: u32 = 0; // start at root (always valid: deserialization rejects empty nodes)
+        // Root is at nodes[1]; nodes[0] is the invalid sentinel.
+        // Deserialization guarantees nodes.len() >= 2.
+        let mut node_idx: u32 = 1;
         for &label in key {
             let code = self.code_map.get(label);
             if code == 0 {
@@ -72,7 +74,7 @@ impl<'a, L: Label> TrieView<'a, L> {
             view: self,
             query,
             pos: 0,
-            node_idx: 0,
+            node_idx: 1, // root is at nodes[1]
             done: false,
         }
     }
@@ -99,16 +101,19 @@ impl<'a, L: Label> TrieView<'a, L> {
     }
 
     /// Finds the first child of `node_idx`.
+    ///
+    /// Still uses an O(alphabet_size) scan in PR-1; superseded by the
+    /// `children_list` representation in PR-2.
     #[inline]
     fn first_child(&self, node_idx: u32) -> Option<u32> {
         let node = self.nodes[node_idx as usize];
         let base = node.base();
-        // Require the `has_leaf` flag before reading the terminal slot. For
-        // node_idx == 0 (root), an uninitialised slot defaults to check=0 and
-        // would otherwise be misidentified as a terminal child of the root.
+        // Require `has_leaf` before reading the terminal slot. With the
+        // sentinel at nodes[0] and root at nodes[1], unused slots (check=0)
+        // no longer collide with the root-as-parent case, so the extra
+        // `terminal_idx != node_idx` guard is redundant.
         let terminal_idx = base;
         if node.has_leaf()
-            && terminal_idx != node_idx
             && (terminal_idx as usize) < self.nodes.len()
             && self.nodes[terminal_idx as usize].check() == node_idx
             && self.nodes[terminal_idx as usize].is_leaf()
@@ -269,10 +274,10 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
             self.children_buf.clear();
 
             // A node has a terminal child iff it carries the `has_leaf` flag.
-            // Relying on `nodes[base].check() == node_idx` alone is unsafe for
-            // the root (node_idx=0), because an uninitialised slot defaults to
-            // check=0 and would falsely match — yielding a phantom terminal
-            // whose bogus sibling chain then masks the real children.
+            // The bounds + leaf checks protect against malformed data where
+            // base(p) points to a slot that isn't a valid terminal; they are
+            // not needed to disambiguate root from unused slots (root now
+            // lives at nodes[1], unused slots are check=0 at nodes[0]).
             let terminal_idx = base;
             let has_real_terminal = node.has_leaf()
                 && (terminal_idx as usize) < node_count

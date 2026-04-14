@@ -118,8 +118,9 @@ impl<L: Label> DoubleArray<L> {
         let (code_map, _consumed) = CodeMapper::from_bytes(&bytes[offset..offset + code_map_len])
             .ok_or(TrieError::TruncatedData)?;
 
-        // Search logic assumes a root node at index 0
-        if nodes.is_empty() {
+        // Search assumes nodes[0] = sentinel and nodes[1] = root, so the
+        // array must have at least 2 entries.
+        if nodes.len() < 2 {
             return Err(TrieError::TruncatedData);
         }
 
@@ -272,6 +273,41 @@ mod tests {
 
         let results: Vec<_> = da2.predictive_search(b"n").collect();
         assert_eq!(results.len(), 4); // "n", "na", "ni", "nu"
+    }
+
+    #[test]
+    fn sentinel_preserved_through_round_trip() {
+        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
+        let da = DoubleArray::<u8>::build(&keys);
+        let bytes = da.as_bytes();
+        let da2 = DoubleArray::<u8>::from_bytes(&bytes).unwrap();
+        assert_eq!(da2.nodes[0], crate::Node::default());
+        assert!(da2.nodes.len() >= 2);
+    }
+
+    #[test]
+    fn rejects_less_than_two_nodes() {
+        // Craft a header claiming nodes_len = 8 bytes (one Node).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.push(VERSION);
+        bytes.extend_from_slice(&[0, 0, 0]);
+        bytes.extend_from_slice(&8u32.to_le_bytes()); // nodes_len = 8 bytes (1 node)
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // siblings_len = 4 bytes
+        bytes.extend_from_slice(&12u32.to_le_bytes()); // code_map_len
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(&[0u8; 8]); // one Node
+        bytes.extend_from_slice(&[0u8; 4]); // one sibling
+        // minimal empty code_map
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 4]); // reverse_table[0] = 0
+
+        assert!(matches!(
+            DoubleArray::<u8>::from_bytes(&bytes),
+            Err(TrieError::TruncatedData)
+        ));
     }
 
     #[test]
