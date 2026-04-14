@@ -298,6 +298,10 @@ mod tests {
     }
 
     #[test]
+    // Builds a 35k-key trie, which takes >15 min under Miri. The smaller
+    // `predictive_search_root_many_children` test covers the same bug, so
+    // there's no value in paying for this one under Miri.
+    #[cfg_attr(miri, ignore)]
     fn predictive_search_emits_every_key_at_scale() {
         // Regression: on large tries, predictive_search(b"") silently dropped
         // ~30% of keys even though exact_match still worked. Reproduces with
