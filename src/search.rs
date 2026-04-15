@@ -105,12 +105,26 @@ pub trait TrieSearch<L: Label> {
     /// performed by the `from_bytes` constructors (section lengths and
     /// end offset) plus monotonicity of `child_offsets`, which the
     /// zero-copy load path skips. Call this after loading a trie
-    /// from an untrusted source to reject malformed inputs before
-    /// issuing any queries; corrupted offsets cannot cause UB (Rust
-    /// slice indexing is bounds-checked) but may produce wrong
-    /// results *or panic at query time* if invalid offsets are
-    /// used for slicing — making skipped validation a potential
-    /// denial-of-service vector for untrusted inputs.
+    /// from an untrusted source to surface malformed inputs as a
+    /// clean error instead of silently wrong results.
+    ///
+    /// # Behaviour without validation
+    ///
+    /// Query paths (`exact_match`, `common_prefix_search`,
+    /// `predictive_search`, `probe`) are written to degrade
+    /// gracefully on malformed offsets or out-of-range
+    /// `children_list` entries: they use guarded indexing
+    /// (`slice::get` / `saturating_sub`) so corruption surfaces as
+    /// empty or partial results, never a panic and never UB.
+    ///
+    /// One caveat: `predictive_search` traverses the CSR children
+    /// graph via an explicit stack without a visited set, so a
+    /// corruption pattern that happens to introduce a cycle can make
+    /// the iterator yield results indefinitely. The iterator still
+    /// does not panic and does not touch memory out of bounds, but
+    /// callers receiving buffers from untrusted sources should
+    /// either run `validate_strict` first or bound consumption with
+    /// `.take(N)`.
     ///
     /// ```
     /// use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};
@@ -606,5 +620,81 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
         let da = build_u8(&keys);
         assert!(da.validate_strict().is_ok());
+    }
+
+    // === corruption robustness ===
+    //
+    // Query paths must not panic on buffers that pass `validate_cheap`
+    // but fail `validate_strict` (non-monotonic `child_offsets`) or on
+    // buffers whose `children_list` contains out-of-range node indices.
+    // These tests pin the no-panic guarantee.
+    //
+    // Note: termination is *not* guaranteed on pathological corruption
+    // — a non-monotonic offset range can happen to include children
+    // entries that form a cycle in the DFS graph, and the query paths
+    // have no visited set. The tests cap iteration with `take(N)` so a
+    // hypothetical cycle still produces a finite test run; the point
+    // is to prove the query does not panic and does not write OOB, not
+    // that it always terminates. Callers who receive untrusted buffers
+    // should run `validate_strict` before querying.
+
+    const MAX_CORRUPT_ITERS: usize = 256;
+
+    #[test]
+    fn predictive_search_survives_non_monotonic_child_offsets() {
+        // Build a valid trie, then hand-build a corrupted DoubleArray
+        // that reuses the same nodes/children but has a non-monotonic
+        // `child_offsets` (passes `validate_cheap`'s length/endpoint
+        // checks, fails `validate_strict`'s monotonicity check).
+        let good = build_u8(&[b"a", b"ab", b"abc"]);
+        let view = good.view();
+        let nodes = view.nodes.to_vec();
+        let children_list = view.children_list.to_vec();
+        let mut child_offsets = view.child_offsets.to_vec();
+        // Swap two interior entries to break monotonicity without
+        // changing the first (must be 0) or last (must equal
+        // `children_list.len()`) entry — those are enforced by
+        // `validate_cheap` and would reject the buffer upstream.
+        let n = child_offsets.len();
+        assert!(n >= 4);
+        child_offsets.swap(1, n - 2);
+        let code_map = good.code_map.clone();
+        let corrupt = DoubleArray::<u8>::new(nodes, child_offsets, children_list, code_map);
+
+        // Sanity: `validate_strict` rejects this, proving the buffer is
+        // genuinely malformed.
+        assert!(corrupt.validate_strict().is_err());
+        // `take` guards against the cycle case described in the module
+        // comment; the real assertion is "this line does not panic".
+        let _ = corrupt
+            .predictive_search(b"a")
+            .take(MAX_CORRUPT_ITERS)
+            .count();
+    }
+
+    #[test]
+    fn predictive_search_survives_out_of_range_children_entry() {
+        // Poison `children_list` with a node index past `nodes.len()`.
+        // `validate_cheap` does not catch this (it only checks
+        // `child_offsets` invariants); `validate_strict` does not
+        // catch it either. The query must still not panic.
+        let good = build_u8(&[b"a", b"ab"]);
+        let view = good.view();
+        let nodes = view.nodes.to_vec();
+        let child_offsets = view.child_offsets.to_vec();
+        let mut children_list = view.children_list.to_vec();
+        assert!(!children_list.is_empty());
+        children_list[0] = u32::MAX; // definitely out of range
+        let code_map = good.code_map.clone();
+        let corrupt = DoubleArray::<u8>::new(nodes, child_offsets, children_list, code_map);
+
+        let _ = corrupt
+            .predictive_search(b"")
+            .take(MAX_CORRUPT_ITERS)
+            .count();
+        let _ = corrupt
+            .predictive_search(b"a")
+            .take(MAX_CORRUPT_ITERS)
+            .count();
     }
 }

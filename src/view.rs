@@ -261,14 +261,29 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
             // present). Iterate in reverse so that extensions end up on the
             // stack in descending order and pop in ascending order, matching
             // the documented traversal order.
+            // `child_offsets[p]` / `[p+1]` cannot panic: `p = node_idx`
+            // came from either `traverse` (for the initial push) or from
+            // the guarded `nodes.get(c)` below (for stack re-entries),
+            // so `p < nodes.len()` and `p + 1 ≤ child_offsets.len()`
+            // by `validate_cheap`'s length invariant.
             let p = node_idx as usize;
             let start = self.view.child_offsets[p] as usize;
             let end = self.view.child_offsets[p + 1] as usize;
-            let children = &self.view.children_list[start..end];
+            // Corrupt offsets — non-monotonic (`start > end`) or
+            // out-of-range relative to `children_list` — yield no
+            // children instead of panicking. `validate_cheap` does not
+            // catch this; `validate_strict` does, but we prefer to
+            // degrade gracefully so untrusted inputs cannot DoS the
+            // iterator.
+            let children = self.view.children_list.get(start..end).unwrap_or(&[]);
 
             let mut result: Option<SearchMatch<L>> = None;
             for &c in children.iter().rev() {
-                let child = &self.view.nodes[c as usize];
+                // Corrupt `children_list` entry pointing past the
+                // `nodes` array — skip silently for the same reason.
+                let Some(child) = self.view.nodes.get(c as usize) else {
+                    continue;
+                };
                 if child.is_leaf() {
                     // Terminal child — yield the current prefix as a match.
                     result = Some(SearchMatch {

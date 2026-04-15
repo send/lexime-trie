@@ -237,9 +237,13 @@ impl<L: Label> DoubleArray<L> {
 /// Monotonicity is intentionally NOT checked here: it would be O(N) and
 /// defeat zero-copy deserialization for the `from_bytes` path. A
 /// non-monotonic or otherwise malformed offset cannot cause UB (Rust slice
-/// indexing is always bounds-checked — corruption surfaces as a panic on
-/// query, never as memory unsafety). Callers that need hard guarantees can
-/// run [`validate_strict`] explicitly.
+/// indexing is always bounds-checked) and does not panic either — query
+/// paths use guarded indexing (`.get()` / `saturating_sub`) that degrades
+/// corrupt regions to empty results. `predictive_search`'s DFS may
+/// however fail to terminate on a corruption pattern that happens to
+/// introduce a cycle in the CSR children graph (no visited set), so
+/// callers with untrusted buffers should run [`validate_strict`]
+/// explicitly or bound iteration with `.take(N)`.
 pub(crate) fn validate_cheap(
     nodes: &[Node],
     child_offsets: &[u32],
@@ -260,10 +264,13 @@ pub(crate) fn validate_cheap(
 /// Full O(N) validation: cheap checks + monotonicity of `child_offsets`.
 ///
 /// Not invoked by either `from_bytes` constructor. Exposed to callers via
-/// `TrieSearch::validate_strict` so they can opt into hard guarantees —
-/// useful when loading trie bytes from an untrusted source where a wrapped
-/// zero-copy slice with non-monotonic offsets could otherwise surface as a
-/// panic on query (a DoS vector), though never as memory unsafety.
+/// `TrieSearch::validate_strict` so they can opt into eager rejection of
+/// malformed buffers — useful when loading trie bytes from an untrusted
+/// source and the caller would rather error out than quietly yield wrong
+/// or partial results. Query paths are panic-safe on non-monotonic
+/// offsets, but `predictive_search` has no visited set and can fail to
+/// terminate on corruption that forms a cycle; callers handling
+/// untrusted input should validate first (or bound iteration).
 pub(crate) fn validate_strict(
     nodes: &[Node],
     child_offsets: &[u32],
