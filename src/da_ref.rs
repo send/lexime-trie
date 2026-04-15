@@ -20,8 +20,8 @@ use crate::{
 /// # Internal representation
 ///
 /// Internally this stores **raw pointers + lengths** rather than real
-/// `&'a [T]` slices because [`DoubleArrayBacked`] holds a
-/// `DoubleArrayRef<'static, L>` co-located with the byte buffer it
+/// `&'a [T]` slices because [`DoubleArrayBacked`](crate::DoubleArrayBacked)
+/// holds a `DoubleArrayRef<'static, L>` co-located with the byte buffer it
 /// borrows from: if the inner type contained real shared references
 /// Stacked Borrows would treat them as strongly-protected during
 /// `drop`, conflicting with reclamation of the backing storage.

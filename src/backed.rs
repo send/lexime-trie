@@ -5,18 +5,28 @@ use crate::{DoubleArrayRef, Label, PrefixMatch, ProbeResult, SearchMatch, TrieEr
 ///
 /// [`DoubleArrayBacked`] stores a raw pointer derived from
 /// `backing.as_ref()` and reuses it for the lifetime of the owner, so
-/// the pointer must remain valid after `backing` is moved into the
-/// outer struct. Implementors guarantee:
+/// the pointer must remain valid — and the bytes behind it must not
+/// change — for as long as the wrapper exists. Implementors guarantee:
 ///
-/// 1. `<Self as AsRef<[u8]>>::as_ref(&self).as_ptr()` stays at the
-///    same address across moves of `self`.
-/// 2. The pointed-to bytes do not change after construction (no
-///    interior mutability that could race with the stored view).
+/// 1. **Address stability across moves.**
+///    `<Self as AsRef<[u8]>>::as_ref(&self).as_ptr()` stays at the
+///    same address (and the same length) across moves of `self`.
+/// 2. **No interior mutability over the payload.** The type offers
+///    no API that mutates the bytes through a shared `&Self`
+///    reference (no `Cell<[u8; N]>`-style storage, no atomic data
+///    payload, no `RefCell`-wrapped buffer). Mutation that requires
+///    `&mut Self` is fine — once `backing` is moved into
+///    `DoubleArrayBacked`, external callers no longer hold any
+///    reference to it, so `&mut`-gated mutation paths are
+///    automatically unreachable until [`DoubleArrayBacked::into_backing`]
+///    returns the buffer.
 ///
 /// # Safety
 ///
 /// Implementing this trait for a type that does not uphold (1) or
-/// (2) makes [`DoubleArrayBacked::from_backing`] unsound.
+/// (2) makes [`DoubleArrayBacked::from_backing`] unsound: either the
+/// stored raw pointer would dangle after a move, or the bytes under
+/// the view could change mid-query.
 ///
 /// # Pre-blessed types
 ///
@@ -70,11 +80,14 @@ unsafe impl StableBacking for &[u8] {}
 /// whose data resides at the **same address** as the original, so the
 /// bytes — and their alignment — are shared rather than re-allocated.
 ///
-/// This unlocks an infallible, zero-cost [`Clone`] impl for
-/// [`DoubleArrayBacked`]: on clone the inner view's raw pointers are
-/// still valid for the cloned backing, so re-parsing (and its potential
-/// [`TrieError::MisalignedData`] failure on unusual allocators) is
-/// avoided entirely.
+/// This unlocks an infallible [`Clone`] impl for [`DoubleArrayBacked`]
+/// that reuses the already-validated backing/view relationship: on
+/// clone the inner view's raw pointers are still valid for the cloned
+/// backing, so re-parsing (and its potential [`TrieError::MisalignedData`]
+/// failure on unusual allocators) is avoided entirely. The inner
+/// code-to-label mapper still clones its lookup tables — a small heap
+/// allocation proportional to the trie's alphabet — so `Clone` is
+/// *cheap*, not strictly zero-cost.
 ///
 /// # Pre-blessed types
 ///
