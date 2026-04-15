@@ -3,10 +3,13 @@ use crate::{CodeMapper, DoubleArray, Label, Node};
 /// Mutable state used during trie construction.
 struct BuildContext {
     nodes: Vec<Node>,
-    /// For each slot, the list of child indices placed by `build_rec`,
-    /// in code-ascending order (terminal first if present). Flattened into
-    /// `children_list` + `child_offsets` once recursion completes.
-    children_per_parent: Vec<Vec<u32>>,
+    /// Flat list of (parent, child) edges recorded during recursion, in DFS
+    /// order. Converted to `child_offsets` + `children_list` at finalisation
+    /// via an O(N + E) count-and-scatter pass (no sort needed: scatter
+    /// preserves DFS insertion order within each parent, which matches the
+    /// desired code-ascending ordering because `build_rec` processes
+    /// children in that order).
+    edges: Vec<(u32, u32)>,
     free_list: FreeList,
 }
 
@@ -104,7 +107,7 @@ impl BuildContext {
         free_list.remove(1);
         Self {
             nodes: vec![Node::default(); capacity],
-            children_per_parent: vec![Vec::new(); capacity],
+            edges: Vec::new(),
             free_list,
         }
     }
@@ -113,7 +116,6 @@ impl BuildContext {
     fn ensure_capacity(&mut self, new_cap: usize) {
         if new_cap > self.nodes.len() {
             self.nodes.resize(new_cap, Node::default());
-            self.children_per_parent.resize(new_cap, Vec::new());
             self.free_list.grow(new_cap);
         }
     }
@@ -150,18 +152,17 @@ impl BuildContext {
         let base = self.find_base(&children);
         self.nodes[parent as usize].set_base(base);
 
-        // Place child nodes
+        // Place child nodes. `children` is sorted by code ascending, so
+        // pushing edges in this order preserves the code-ascending invariant
+        // within each parent's slice once the count-and-scatter flatten runs.
         let mut child_indices: Vec<u32> = Vec::with_capacity(children.len());
         for &(code, _, _) in &children {
             let child_idx = base ^ code;
             child_indices.push(child_idx);
             self.free_list.remove(child_idx);
             self.nodes[child_idx as usize].set_check(parent);
+            self.edges.push((parent, child_idx));
         }
-
-        // Record this parent's children for later flattening into children_list.
-        // `child_indices` is already in code-ascending order (terminal first).
-        self.children_per_parent[parent as usize] = child_indices.clone();
 
         // Set leaf/has_leaf flags and recurse into non-terminal children
         for (ci, &(code, child_begin, child_end)) in children.iter().enumerate() {
@@ -297,16 +298,29 @@ impl<L: Label> DoubleArray<L> {
             .unwrap_or(1);
         let final_len = (last_used + 1).max(2);
         ctx.nodes.truncate(final_len);
-        ctx.children_per_parent.truncate(final_len);
 
-        // Flatten children_per_parent into child_offsets (CSR offsets, len N+1)
-        // and children_list (flat, len E).
-        let mut child_offsets: Vec<u32> = Vec::with_capacity(final_len + 1);
-        let mut children_list: Vec<u32> = Vec::new();
-        child_offsets.push(0);
-        for slot_children in &ctx.children_per_parent {
-            children_list.extend_from_slice(slot_children);
-            child_offsets.push(children_list.len() as u32);
+        // Flatten edges into child_offsets (CSR, len N+1) + children_list (len E)
+        // via count-and-scatter — O(N + E), no sort. build_rec enqueues edges
+        // in code-ascending order per parent, and scatter preserves that
+        // order because it writes consecutive slots as edges are read.
+        let edge_count = ctx.edges.len();
+        let mut child_offsets: Vec<u32> = vec![0u32; final_len + 1];
+        // Count phase: child_offsets[p + 1] temporarily holds the count for p.
+        for &(p, _) in &ctx.edges {
+            child_offsets[p as usize + 1] += 1;
+        }
+        // Prefix sum → cumulative offsets.
+        for i in 1..=final_len {
+            child_offsets[i] += child_offsets[i - 1];
+        }
+        // Scatter phase. `write_pos[p]` starts at child_offsets[p] and is
+        // bumped each time an edge for p is placed.
+        let mut write_pos = child_offsets[..final_len].to_vec();
+        let mut children_list: Vec<u32> = vec![0u32; edge_count];
+        for (p, c) in ctx.edges {
+            let slot = write_pos[p as usize] as usize;
+            children_list[slot] = c;
+            write_pos[p as usize] += 1;
         }
 
         Self::new(ctx.nodes, child_offsets, children_list, code_map)

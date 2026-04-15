@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::mem;
 
-use crate::serial::{validate_structural_invariants, HeaderV3};
+use crate::serial::{validate_cheap, HeaderV3};
 use crate::view::TrieView;
 use crate::{
     CodeMapper, DoubleArray, Label, Node, PrefixMatch, ProbeResult, SearchMatch, TrieError,
@@ -76,7 +76,7 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
             std::slice::from_raw_parts(children_list_ptr as *const u32, header.children_count)
         };
 
-        validate_structural_invariants(child_offsets, children_list)?;
+        validate_cheap(child_offsets, children_list)?;
 
         // code_map is always deserialized to heap
         let (code_map, _) = CodeMapper::from_bytes(

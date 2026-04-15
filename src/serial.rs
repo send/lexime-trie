@@ -209,28 +209,48 @@ impl<L: Label> DoubleArray<L> {
         )
         .ok_or(TrieError::TruncatedData)?;
 
-        validate_structural_invariants(&child_offsets, &children_list)?;
+        validate_cheap(&child_offsets, &children_list)?;
 
         Ok(Self::new(nodes, child_offsets, children_list, code_map))
     }
 }
 
-/// Validates structural invariants of `child_offsets` + `children_list`.
-/// Does not verify per-edge `nodes[c].check() == parent`, which would be
-/// O(E) and defeat zero-copy deserialization.
-pub(crate) fn validate_structural_invariants(
+/// O(1) sanity checks on `child_offsets` + `children_list` run at load time.
+///
+/// Only the endpoints are verified:
+/// - `child_offsets[0] == 0`
+/// - `child_offsets[N] == children_list.len()`
+///
+/// Monotonicity is intentionally NOT checked here: it would be O(N) and
+/// defeat zero-copy deserialization for the `from_bytes_ref` path. A
+/// non-monotonic or otherwise malformed offset cannot cause UB (Rust slice
+/// indexing is always bounds-checked — corruption surfaces as a panic on
+/// query, never as memory unsafety). Callers that need hard guarantees can
+/// run [`validate_strict`] explicitly.
+pub(crate) fn validate_cheap(
     child_offsets: &[u32],
     children_list: &[u32],
 ) -> Result<(), TrieError> {
-    // child_offsets[0] must be 0 so slicing starts cleanly.
     if child_offsets.first() != Some(&0) {
         return Err(TrieError::TruncatedData);
     }
-    // Final offset must match the children_list length.
     if child_offsets.last() != Some(&(children_list.len() as u32)) {
         return Err(TrieError::TruncatedData);
     }
-    // Offsets must be monotonically non-decreasing.
+    Ok(())
+}
+
+/// Full O(N) validation: cheap checks + monotonicity of `child_offsets`.
+///
+/// Not invoked by `from_bytes` / `from_bytes_ref`. Currently used only by
+/// tests; a public wrapper on `DoubleArray` / `DoubleArrayRef` can be added
+/// later if callers need to reject malformed input before any query.
+#[cfg(test)]
+pub(crate) fn validate_strict(
+    child_offsets: &[u32],
+    children_list: &[u32],
+) -> Result<(), TrieError> {
+    validate_cheap(child_offsets, children_list)?;
     for w in child_offsets.windows(2) {
         if w[0] > w[1] {
             return Err(TrieError::TruncatedData);
@@ -445,23 +465,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_monotonic_child_offsets() {
-        // Build a valid trie, then corrupt child_offsets in-place so that
-        // some consecutive pair is decreasing.
-        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
-        let da = DoubleArray::<u8>::build(&keys);
-        let mut bytes = da.as_bytes();
-
-        // Locate child_offsets section: after header (24) + nodes (N*8).
-        let n = da.nodes.len();
-        let child_offsets_start = HEADER_SIZE + n * 8;
-        // Corrupt child_offsets[1]: write a big value there so it's
-        // greater than child_offsets[2]. The monotonicity check must fire.
-        let entry_offset = child_offsets_start + 4; // child_offsets[1]
-        bytes[entry_offset..entry_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-
+    fn validate_strict_rejects_non_monotonic_child_offsets() {
+        // The load path (from_bytes / from_bytes_ref) deliberately skips the
+        // O(N) monotonicity check to keep zero-copy deserialization O(1).
+        // `validate_strict` is the opt-in O(N) path callers can run when
+        // they need to reject malformed input before any query.
+        let child_offsets: Vec<u32> = vec![0, 5, 2, 0]; // non-monotonic: 5 > 2
+        let children_list: Vec<u32> = vec![0u32; 0];
         assert!(matches!(
-            DoubleArray::<u8>::from_bytes(&bytes),
+            validate_strict(&child_offsets, &children_list),
             Err(TrieError::TruncatedData)
         ));
     }

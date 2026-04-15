@@ -100,16 +100,6 @@ impl<'a, L: Label> TrieView<'a, L> {
         }
     }
 
-    /// Returns the slice of child indices for `node_idx`, in code-ascending
-    /// order (terminal first if present).
-    #[inline]
-    fn children_of(&self, node_idx: u32) -> &'a [u32] {
-        let p = node_idx as usize;
-        let start = self.child_offsets[p] as usize;
-        let end = self.child_offsets[p + 1] as usize;
-        &self.children_list[start..end]
-    }
-
     /// Probe a key. Returns whether the key exists and whether it has children.
     #[inline]
     pub(crate) fn probe(&self, key: &[L]) -> ProbeResult {
@@ -124,21 +114,30 @@ impl<'a, L: Label> TrieView<'a, L> {
         };
 
         let node = self.nodes[node_idx as usize];
-        let children = self.children_of(node_idx);
-        let n = children.len();
 
-        if node.has_leaf() && n > 0 {
-            // By construction, the first child is the terminal (code 0).
-            let terminal_idx = children[0] as usize;
-            let terminal = self.nodes[terminal_idx];
-            if terminal.is_leaf() {
-                return ProbeResult {
-                    value: Some(terminal.value_id()),
-                    has_children: n > 1,
-                };
+        // Fast path: `has_leaf` means the terminal child is at
+        // `base(p) XOR 0 == base(p)`. We don't need to touch `children_list`
+        // to find it — identical to the v2 code path. `child_offsets` is
+        // still needed to decide `has_children` (child count beyond terminal).
+        if node.has_leaf() {
+            let terminal_idx = node.base() as usize;
+            if terminal_idx < self.nodes.len() {
+                let terminal = self.nodes[terminal_idx];
+                if terminal.check() == node_idx && terminal.is_leaf() {
+                    let p = node_idx as usize;
+                    let n = (self.child_offsets[p + 1] - self.child_offsets[p]) as usize;
+                    return ProbeResult {
+                        value: Some(terminal.value_id()),
+                        has_children: n > 1,
+                    };
+                }
             }
         }
 
+        // No terminal child — `has_children` is whether the children slice
+        // is non-empty.
+        let p = node_idx as usize;
+        let n = (self.child_offsets[p + 1] - self.child_offsets[p]) as usize;
         ProbeResult {
             value: None,
             has_children: n > 0,
