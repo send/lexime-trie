@@ -649,6 +649,11 @@ mod tests {
     }
 
     #[test]
+    // 200k-char build runs ~100–1000× slower under Miri, effectively hangs
+    // the CI miri job. The non-Miri test still proves the iterative rewrite
+    // tolerates depths the recursive form could not — Miri can't catch a
+    // stack overflow anyway, so skipping costs nothing here.
+    #[cfg_attr(miri, ignore)]
     fn build_handles_very_long_key_without_stack_overflow() {
         // Regression: the recursive `build_rec` would blow the Rust stack on
         // keys long enough that depth exceeded the default thread stack
