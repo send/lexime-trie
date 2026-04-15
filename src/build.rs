@@ -101,9 +101,15 @@ impl FreeList {
 impl BuildContext {
     fn new(capacity: usize) -> Self {
         let mut free_list = FreeList::new(capacity);
-        // nodes[0] is the invalid sentinel, nodes[1] is the root.
-        // Neither is ever used as a child slot, so both are removed up front.
-        free_list.remove(0);
+        // nodes[0] is the invalid sentinel and doubles as the free-list head.
+        // It must stay in the cyclic list — removing it would cut the chain
+        // and force `find_base` to grow capacity on the very first call,
+        // orphaning every already-allocated free slot. `is_free(0)` is
+        // hardcoded to return false, so `find_base` still rejects any base
+        // that would place a child at index 0.
+        //
+        // nodes[1] is the root and never acts as a child slot, so it is
+        // removed up front.
         free_list.remove(1);
         Self {
             nodes: vec![Node::default(); capacity],
@@ -312,17 +318,32 @@ impl<L: Label> DoubleArray<L> {
         // in code-ascending order per parent, and scatter preserves that
         // order because it writes consecutive slots as edges are read.
         let edge_count = ctx.edges.len();
+        // CSR offsets are stored as `u32`; if `edge_count` doesn't fit, the
+        // prefix-sum loop below would silently wrap in release. Reject
+        // explicitly instead. In practice this is unreachable given the
+        // 31-bit `keys.len()` cap plus the free-list size bounds, but the
+        // guard costs nothing and documents the invariant.
+        assert!(
+            edge_count <= u32::MAX as usize,
+            "trie has too many edges to encode CSR offsets as u32 (max {})",
+            u32::MAX
+        );
         let mut child_offsets: Vec<u32> = vec![0u32; final_len + 1];
         // Count phase: child_offsets[p + 1] temporarily holds the count for p.
+        // No overflow possible: each edge contributes +1 and `edge_count`
+        // is bounded by `u32::MAX`, so no single bucket exceeds that either.
         for &(p, _) in &ctx.edges {
             child_offsets[p as usize + 1] += 1;
         }
         // Prefix sum → cumulative offsets.
+        // `child_offsets[final_len]` will equal `edge_count`, which fits in
+        // u32 by the assert above; every intermediate value is ≤ that.
         for i in 1..=final_len {
             child_offsets[i] += child_offsets[i - 1];
         }
         // Scatter phase. `write_pos[p]` starts at child_offsets[p] and is
-        // bumped each time an edge for p is placed.
+        // bumped each time an edge for p is placed. `write_pos[p]` is
+        // bounded by `child_offsets[p + 1] <= edge_count`, also ≤ u32::MAX.
         let mut write_pos = child_offsets[..final_len].to_vec();
         let mut children_list: Vec<u32> = vec![0u32; edge_count];
         for (p, c) in ctx.edges {
@@ -427,6 +448,25 @@ mod tests {
                 "child index {c} appears more than once in children_list"
             );
         }
+    }
+
+    #[test]
+    fn free_list_head_survives_build_context_init() {
+        // Regression: if BuildContext::new removed the sentinel (index 0)
+        // from the free list, `first_free()` would return None right after
+        // construction, forcing `find_base` to grow capacity immediately
+        // and orphan every slot in the initial region.
+        let ctx = BuildContext::new(16);
+        assert_eq!(
+            ctx.free_list.first_free(),
+            Some(2),
+            "first free slot after reserving root=1 must be 2, not None"
+        );
+        // And the sentinel must still be treated as unavailable.
+        assert!(
+            !ctx.free_list.is_free(0),
+            "index 0 must not be reported as free"
+        );
     }
 
     #[test]

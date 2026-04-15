@@ -124,8 +124,7 @@ impl<'a, L: Label> TrieView<'a, L> {
             if terminal_idx < self.nodes.len() {
                 let terminal = self.nodes[terminal_idx];
                 if terminal.check() == node_idx && terminal.is_leaf() {
-                    let p = node_idx as usize;
-                    let n = (self.child_offsets[p + 1] - self.child_offsets[p]) as usize;
+                    let n = child_range_width(self.child_offsets, node_idx);
                     return ProbeResult {
                         value: Some(terminal.value_id()),
                         has_children: n > 1,
@@ -136,13 +135,22 @@ impl<'a, L: Label> TrieView<'a, L> {
 
         // No terminal child — `has_children` is whether the children slice
         // is non-empty.
-        let p = node_idx as usize;
-        let n = (self.child_offsets[p + 1] - self.child_offsets[p]) as usize;
+        let n = child_range_width(self.child_offsets, node_idx);
         ProbeResult {
             value: None,
             has_children: n > 0,
         }
     }
+}
+
+/// Width of `child_offsets[p+1] - child_offsets[p]` as `usize`. Uses
+/// saturating arithmetic so that non-monotonic offsets (only possible
+/// from a corrupted buffer) yield 0 instead of wrapping silently to a
+/// huge value and misreporting `has_children`.
+#[inline]
+fn child_range_width(child_offsets: &[u32], p: u32) -> usize {
+    let p = p as usize;
+    child_offsets[p + 1].saturating_sub(child_offsets[p]) as usize
 }
 
 pub(crate) struct CommonPrefixIter<'a, L: Label> {
