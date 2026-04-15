@@ -262,8 +262,8 @@ pub(crate) fn validate_cheap(
 /// Not invoked by either `from_bytes` constructor. Exposed to callers via
 /// `TrieSearch::validate_strict` so they can opt into hard guarantees —
 /// useful when loading trie bytes from an untrusted source where a wrapped
-/// zero-copy slice with non-monotonic offsets could otherwise produce
-/// wrong results (not UB) at query time.
+/// zero-copy slice with non-monotonic offsets could otherwise surface as a
+/// panic on query (a DoS vector), though never as memory unsafety.
 pub(crate) fn validate_strict(
     nodes: &[Node],
     child_offsets: &[u32],

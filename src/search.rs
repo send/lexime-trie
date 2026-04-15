@@ -107,8 +107,10 @@ pub trait TrieSearch<L: Label> {
     /// zero-copy load path skips. Call this after loading a trie
     /// from an untrusted source to reject malformed inputs before
     /// issuing any queries; corrupted offsets cannot cause UB (Rust
-    /// slice indexing is bounds-checked) but can produce wrong
-    /// results at query time.
+    /// slice indexing is bounds-checked) but may produce wrong
+    /// results *or panic at query time* if invalid offsets are
+    /// used for slicing — making skipped validation a potential
+    /// denial-of-service vector for untrusted inputs.
     ///
     /// ```
     /// use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};

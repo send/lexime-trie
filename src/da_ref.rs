@@ -136,11 +136,22 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
     #[inline]
     pub(crate) fn view(&self) -> TrieView<'_, L> {
         // SAFETY: the three raw pointers were produced during construction
-        // from slices borrowed for `'a` (or `'static` synthesised by
-        // `DoubleArrayBacked`). The `PhantomData<&'a [u8]>` marker ensures
-        // `&self` cannot outlive the underlying buffer, so the reconstructed
-        // slices are valid for the returned `'_` lifetime. Alignment, bounds,
-        // and layout were all checked in `from_bytes`.
+        // from validated slices in `from_bytes`. Two cases to consider for
+        // how long those pointers remain valid, both of which bound
+        // validity to at least the returned `'_` lifetime:
+        //
+        // - Normal borrow case (`DoubleArrayRef::from_bytes(bytes: &'a [u8])`):
+        //   the slices borrow into `bytes`, and the `PhantomData<&'a [u8]>`
+        //   marker prevents this `DoubleArrayRef` from outliving that borrow.
+        // - Self-referential case (`DoubleArrayBacked`, which stores a
+        //   `DoubleArrayRef<'static, L>` beside the owned backing):
+        //   the `'static` marker is synthesised and provides no real
+        //   protection, but soundness follows from ownership — the
+        //   backing is owned by the outer struct and outlives every
+        //   `&self` borrow of the wrapper (and therefore this view).
+        //
+        // In both cases the reconstructed slices are valid for `'_`.
+        // Alignment, bounds, and layout were all checked in `from_bytes`.
         unsafe {
             TrieView {
                 nodes: std::slice::from_raw_parts(self.nodes_ptr, self.nodes_len),
