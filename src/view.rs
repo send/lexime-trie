@@ -276,12 +276,13 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
                         value_id: child.value_id(),
                     });
                 } else {
-                    // Extension child — push onto the DFS stack.
+                    // Extension child — push onto the DFS stack. `reverse`
+                    // yields `Option<L>` directly, handling both out-of-range
+                    // codes and any pathological u32 → L conversion failure
+                    // (the latter cannot occur in normal data).
                     let child_code = base ^ c;
-                    if let Some(label_u32) = self.view.code_map.reverse(child_code) {
-                        if let Ok(l) = L::try_from(label_u32) {
-                            self.stack.push((c, depth, Some(l)));
-                        }
+                    if let Some(l) = self.view.code_map.reverse::<L>(child_code) {
+                        self.stack.push((c, depth, Some(l)));
                     }
                 }
             }

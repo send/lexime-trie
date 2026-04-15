@@ -1,34 +1,17 @@
 /// A label type for use as trie keys.
 ///
 /// Labels must be copyable, orderable, and convertible to/from `u32`.
-/// `ALPHABET_SIZE` defines the theoretical maximum number of distinct labels.
-pub trait Label: Copy + Ord + Into<u32> + TryFrom<u32> {
-    /// The theoretical maximum number of distinct label values.
-    const ALPHABET_SIZE: u32;
-}
+/// The forward conversion (`Into<u32>`) is used to compute codes during
+/// build; the reverse (`TryFrom<u32>`) decodes labels when iterating
+/// search results.
+pub trait Label: Copy + Ord + Into<u32> + TryFrom<u32> {}
 
-impl Label for u8 {
-    const ALPHABET_SIZE: u32 = 256;
-}
+impl Label for u8 {}
 
-impl Label for char {
-    const ALPHABET_SIZE: u32 = 0x11_0000;
-}
+impl Label for char {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn u8_alphabet_size() {
-        assert_eq!(u8::ALPHABET_SIZE, 256);
-    }
-
-    #[test]
-    fn char_alphabet_size() {
-        assert_eq!(char::ALPHABET_SIZE, 0x11_0000);
-    }
-
     #[test]
     fn u8_round_trip() {
         for v in [0u8, 1, 127, 255] {

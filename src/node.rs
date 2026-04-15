@@ -9,7 +9,7 @@ const MASK: u32 = 0x7FFF_FFFF;
 /// - `check`: 31-bit parent index | HAS_LEAF flag (MSB)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Node {
+pub(crate) struct Node {
     base: u32,
     check: u32,
 }
@@ -17,78 +17,60 @@ pub struct Node {
 impl Node {
     /// Returns the base value (XOR offset), masking out the IS_LEAF flag.
     #[inline]
-    pub fn base(&self) -> u32 {
+    pub(crate) fn base(&self) -> u32 {
         self.base & MASK
     }
 
     /// Returns the check value (parent index), masking out the HAS_LEAF flag.
     #[inline]
-    pub fn check(&self) -> u32 {
+    pub(crate) fn check(&self) -> u32 {
         self.check & MASK
     }
 
     /// Returns true if this node is a leaf (terminal node storing a value_id).
     #[inline]
-    pub fn is_leaf(&self) -> bool {
+    pub(crate) fn is_leaf(&self) -> bool {
         self.base & IS_LEAF != 0
     }
 
     /// Returns true if this node has a terminal child (code 0 child exists).
     #[inline]
-    pub fn has_leaf(&self) -> bool {
+    pub(crate) fn has_leaf(&self) -> bool {
         self.check & HAS_LEAF != 0
     }
 
     /// Returns the value_id stored in a leaf node.
     /// Only meaningful when `is_leaf()` is true.
     #[inline]
-    pub fn value_id(&self) -> u32 {
+    pub(crate) fn value_id(&self) -> u32 {
         self.base & MASK
     }
 
     /// Sets the base value (XOR offset), preserving the IS_LEAF flag.
     #[inline]
-    pub fn set_base(&mut self, base: u32) {
+    pub(crate) fn set_base(&mut self, base: u32) {
         debug_assert!(base & IS_LEAF == 0, "base value must fit in 31 bits");
         self.base = (self.base & IS_LEAF) | base;
     }
 
     /// Sets the check value (parent index), preserving the HAS_LEAF flag.
     #[inline]
-    pub fn set_check(&mut self, check: u32) {
+    pub(crate) fn set_check(&mut self, check: u32) {
         debug_assert!(check & HAS_LEAF == 0, "check value must fit in 31 bits");
         self.check = (self.check & HAS_LEAF) | check;
     }
 
     /// Marks this node as a leaf and stores the value_id.
     #[inline]
-    pub fn set_leaf(&mut self, value_id: u32) {
+    pub(crate) fn set_leaf(&mut self, value_id: u32) {
         debug_assert!(value_id & IS_LEAF == 0, "value_id must fit in 31 bits");
         self.base = IS_LEAF | value_id;
     }
 
     /// Sets the HAS_LEAF flag indicating a terminal child exists.
     #[inline]
-    pub fn set_has_leaf(&mut self) {
+    pub(crate) fn set_has_leaf(&mut self) {
         self.check |= HAS_LEAF;
-    }
-
-    /// Returns the raw base field including flags (for serialization).
-    #[inline]
-    pub fn raw_base(&self) -> u32 {
-        self.base
-    }
-
-    /// Returns the raw check field including flags (for serialization).
-    #[inline]
-    pub fn raw_check(&self) -> u32 {
-        self.check
-    }
-
-    /// Constructs a Node from raw base and check values (for deserialization).
-    #[inline]
-    pub fn from_raw(base: u32, check: u32) -> Self {
-        Self { base, check }
     }
 }
 

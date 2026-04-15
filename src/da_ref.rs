@@ -105,8 +105,10 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
         }
     }
 
-    /// Returns the number of nodes in the trie.
-    pub fn num_nodes(&self) -> usize {
+    /// Returns the number of node slots in the trie's underlying array.
+    ///
+    /// See [`DoubleArray::node_slot_count`] for semantics.
+    pub fn node_slot_count(&self) -> usize {
         self.nodes.len()
     }
 
@@ -346,11 +348,11 @@ mod tests {
     }
 
     #[test]
-    fn num_nodes_via_ref() {
+    fn node_slot_count_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
         let buf = AlignedBuffer::new(&da.as_bytes());
         let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
-        assert_eq!(da_ref.num_nodes(), da.num_nodes());
+        assert_eq!(da_ref.node_slot_count(), da.node_slot_count());
     }
 }

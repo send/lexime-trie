@@ -402,19 +402,19 @@ mod tests {
     fn build_empty() {
         let keys: Vec<&[u8]> = vec![];
         let da = DoubleArray::<u8>::build(&keys);
-        assert!(da.num_nodes() > 0); // at least root
+        assert!(da.node_slot_count() > 0); // at least root
     }
 
     #[test]
     fn build_single_key() {
         let da = DoubleArray::<u8>::build(&[b"abc"]);
-        assert!(da.num_nodes() > 1);
+        assert!(da.node_slot_count() > 1);
     }
 
     #[test]
     fn build_shared_prefix() {
         let da = DoubleArray::<u8>::build(&[b"abc", b"abd", b"xyz"]);
-        assert!(da.num_nodes() > 1);
+        assert!(da.node_slot_count() > 1);
     }
 
     #[test]
@@ -425,7 +425,7 @@ mod tests {
             "かき".chars().collect(),
         ];
         let da = DoubleArray::<char>::build(&keys);
-        assert!(da.num_nodes() > 1);
+        assert!(da.node_slot_count() > 1);
     }
 
     #[test]
@@ -666,7 +666,7 @@ mod tests {
         let long_key: Vec<u8> = std::iter::repeat_n(b'a', 200_000).collect();
         let keys: Vec<&[u8]> = vec![&long_key];
         let da = DoubleArray::<u8>::build(&keys);
-        assert!(da.num_nodes() > 1);
+        assert!(da.node_slot_count() > 1);
     }
 
     #[test]

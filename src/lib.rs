@@ -56,11 +56,12 @@ mod view;
 
 use std::marker::PhantomData;
 
-pub use code_map::CodeMapper;
 pub use da_ref::DoubleArrayRef;
 pub use label::Label;
-pub use node::Node;
 pub use search::{PrefixMatch, ProbeResult, SearchMatch};
+
+use code_map::CodeMapper;
+use node::Node;
 
 /// Errors that can occur during trie operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,8 +126,19 @@ impl<L: Label> DoubleArray<L> {
         }
     }
 
-    /// Returns the number of nodes in the trie.
-    pub fn num_nodes(&self) -> usize {
+    /// Returns the number of node slots in the trie's underlying array.
+    ///
+    /// This is the length of the `nodes` vector after trailing-trim —
+    /// not the number of "live" nodes. The sentinel at index 0 and any
+    /// unused free slots embedded in the array are counted. For a trie
+    /// built from N keys with moderate branching, slot count is typically
+    /// a small multiple of N (free slots between occupied ones from the
+    /// double-array XOR placement).
+    ///
+    /// Useful for sanity checks and rough memory estimates. For exact
+    /// live-node counts, iterate `self.nodes` and filter by
+    /// `!= Node::default()`.
+    pub fn node_slot_count(&self) -> usize {
         self.nodes.len()
     }
 }
