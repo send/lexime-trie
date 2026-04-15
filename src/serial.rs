@@ -137,20 +137,33 @@ impl<L: Label> DoubleArray<L> {
         let nodes_count = self.nodes.len();
         let children_count = self.children_list.len();
 
-        debug_assert!(
+        // These invariants are upheld by `DoubleArray::build` (31-bit
+        // value_id cap, explicit edge-count guard, CSR length) and by the
+        // only other constructor path, `from_bytes`, which validates via
+        // `validate_cheap`. They cannot be violated by a correctly
+        // constructed `DoubleArray`, but we check in release anyway: if a
+        // future refactor ever broke the invariant, the `as u32` truncation
+        // below would produce a buffer whose header claims fewer elements
+        // than the payload contains. `from_bytes_ref` would then build a
+        // slice over truncated bounds, and the extra bytes would be
+        // silently treated as a different section. Asserting here keeps
+        // that class of corruption from ever escaping into a serialized
+        // buffer. The cost is four integer comparisons per serialisation,
+        // which is not a hot path.
+        assert!(
             nodes_count <= u32::MAX as usize,
             "nodes_count exceeds u32::MAX"
         );
-        debug_assert!(
+        assert!(
             children_count <= u32::MAX as usize,
             "children_count exceeds u32::MAX"
         );
-        debug_assert_eq!(
+        assert_eq!(
             self.child_offsets.len(),
             nodes_count + 1,
             "child_offsets length must equal nodes_count + 1"
         );
-        debug_assert!(
+        assert!(
             code_map_size <= u32::MAX as usize,
             "code_map section exceeds u32::MAX bytes"
         );

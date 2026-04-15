@@ -1,4 +1,29 @@
+use std::collections::HashMap;
+
 use crate::Label;
+
+/// Threshold for switching from a dense `Vec<u64>` frequency table to a
+/// `HashMap<u32, u64>` during `CodeMapper::build`.
+///
+/// Dense array is strictly faster (O(1) load+store vs. HashMap's hash and
+/// probe), but it allocates `8 * (max_label + 1)` bytes up-front. For common
+/// Japanese workloads (hiragana/katakana/CJK basic) max_label stays below
+/// 0xA000, so the dense array costs at most ~320 KB — a clear win over
+/// HashMap overhead.
+///
+/// For keys that include emoji (U+1F000+) or supplementary planes the
+/// dense freq array balloons (U+10FFFF → 8 MB). The HashMap branch only
+/// bounds *that* counting structure by the number of distinct labels —
+/// the forward lookup `table: Vec<u32>` is still allocated densely up to
+/// `max_label + 1` regardless, because `get()` is the hot search path
+/// and must stay O(1). So the threshold trades one transient 8 MB
+/// allocation for HashMap overhead during build, while the persistent
+/// `table` still scales with `max_label`.
+///
+/// 65_536 is chosen as the cutoff: it covers the BMP entirely (typical
+/// Japanese-only dictionaries stay well under it) and caps the dense
+/// allocation at 512 KB per table.
+const FREQ_DENSE_THRESHOLD: u32 = 65_536;
 
 /// Maps labels to dense, frequency-ordered codes.
 ///
@@ -44,21 +69,33 @@ impl CodeMapper {
             .checked_add(1)
             .expect("CodeMapper::build: label space too large for this platform");
 
-        // Direct frequency counting — avoids HashMap overhead.
-        let mut freq = vec![0u64; table_size];
-        for key in keys {
-            for &label in key.as_ref() {
-                freq[<L as Into<u32>>::into(label) as usize] += 1;
+        // Count label frequencies. For dense alphabets (u8 keys, or `char`
+        // keys staying within the BMP) we use a `Vec<u64>` indexed directly
+        // by label value — the fastest option. For sparse-but-wide alphabets
+        // (char keys reaching into astral planes), we fall back to a
+        // HashMap so memory scales with distinct labels instead of with
+        // the maximum label value.
+        let mut labels: Vec<(u32, u64)> = if max_label < FREQ_DENSE_THRESHOLD {
+            let mut freq = vec![0u64; table_size];
+            for key in keys {
+                for &label in key.as_ref() {
+                    freq[<L as Into<u32>>::into(label) as usize] += 1;
+                }
             }
-        }
-
-        // Collect (label, freq) pairs for non-zero entries
-        let mut labels: Vec<(u32, u64)> = freq
-            .iter()
-            .enumerate()
-            .filter(|(_, &f)| f > 0)
-            .map(|(i, &f)| (i as u32, f))
-            .collect();
+            freq.iter()
+                .enumerate()
+                .filter(|(_, &f)| f > 0)
+                .map(|(i, &f)| (i as u32, f))
+                .collect()
+        } else {
+            let mut freq: HashMap<u32, u64> = HashMap::new();
+            for key in keys {
+                for &label in key.as_ref() {
+                    *freq.entry(label.into()).or_insert(0) += 1;
+                }
+            }
+            freq.into_iter().collect()
+        };
 
         // Sort by frequency descending, then by label ascending for stability
         labels.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -112,28 +149,56 @@ impl CodeMapper {
     }
 
     /// Returns the serialised size in bytes (without allocating).
+    ///
+    /// Uses checked arithmetic to match the style of `serial::as_bytes`
+    /// and `CodeMapper::from_bytes`. A wrapped value here would feed a
+    /// too-small `Vec::with_capacity` in `as_bytes`; the subsequent
+    /// `extend_from_slice` calls inside `write_to` would still produce
+    /// a correct buffer (they grow as needed), but the capacity hint
+    /// would be wrong and reallocation cost would be incurred silently.
     #[inline]
     pub(crate) fn serialized_size(&self) -> usize {
-        12 + (self.table.len() + self.reverse_table.len()) * 4
+        let table_bytes = self
+            .table
+            .len()
+            .checked_mul(4)
+            .expect("CodeMapper::serialized_size: table size overflows usize");
+        let reverse_bytes = self
+            .reverse_table
+            .len()
+            .checked_mul(4)
+            .expect("CodeMapper::serialized_size: reverse_table size overflows usize");
+        12usize
+            .checked_add(table_bytes)
+            .and_then(|s| s.checked_add(reverse_bytes))
+            .expect("CodeMapper::serialized_size: total exceeds usize::MAX")
     }
 
     /// Writes the serialised CodeMapper directly into `buf`.
     ///
     /// This avoids the intermediate `Vec<u8>` allocation that `as_bytes()` performs.
     pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
+        // Reserve up-front so the per-element `extend_from_slice` calls
+        // never reallocate. `serialized_size()` already validates the
+        // arithmetic, so subtracting the 12-byte header gives a payload
+        // length that is guaranteed to fit. `extend_from_slice` of a
+        // 4-byte array compiles to a length check + memcpy + length
+        // update — no zero-init pass like `resize(_, 0)` would incur.
+        let payload = self.serialized_size() - 12;
+        buf.reserve(payload + 12);
+
         buf.extend_from_slice(&(self.table.len() as u32).to_le_bytes());
         buf.extend_from_slice(&(self.reverse_table.len() as u32).to_le_bytes());
         buf.extend_from_slice(&self.alphabet_size.to_le_bytes());
-        // SAFETY: u32 has no padding; LE platform is enforced by the crate-level compile_error.
-        unsafe {
-            buf.extend_from_slice(std::slice::from_raw_parts(
-                self.table.as_ptr() as *const u8,
-                self.table.len() * 4,
-            ));
-            buf.extend_from_slice(std::slice::from_raw_parts(
-                self.reverse_table.as_ptr() as *const u8,
-                self.reverse_table.len() * 4,
-            ));
+
+        // `to_le_bytes` makes the byte order explicit rather than relying
+        // on in-memory representation, so the code stays correct if the
+        // LE compile-time guard is ever relaxed.
+        for &v in &self.table {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        for &v in &self.reverse_table {
+            buf.extend_from_slice(&v.to_le_bytes());
         }
     }
 
@@ -164,30 +229,20 @@ impl CodeMapper {
 
         let mut offset = 12;
 
-        // SAFETY: u32 has no padding; LE layout matches serialised format.
-        // with_capacity + set_len avoids redundant zero-initialisation.
-        let table = unsafe {
-            let mut v = Vec::<u32>::with_capacity(table_len);
-            std::ptr::copy_nonoverlapping(
-                bytes[offset..].as_ptr(),
-                v.as_mut_ptr() as *mut u8,
-                table_bytes,
-            );
-            v.set_len(table_len);
-            v
-        };
+        // Decode each u32 explicitly via `from_le_bytes`. Slower than a raw
+        // memcpy over the full region, but (a) `from_bytes` is a one-time
+        // setup cost — not in the query hot path — and (b) the explicit
+        // byte order keeps the code correct regardless of host endianness.
+        let table: Vec<u32> = bytes[offset..offset + table_bytes]
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         offset += table_bytes;
 
-        let reverse_table = unsafe {
-            let mut v = Vec::<u32>::with_capacity(reverse_len);
-            std::ptr::copy_nonoverlapping(
-                bytes[offset..].as_ptr(),
-                v.as_mut_ptr() as *mut u8,
-                reverse_bytes,
-            );
-            v.set_len(reverse_len);
-            v
-        };
+        let reverse_table: Vec<u32> = bytes[offset..offset + reverse_bytes]
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         offset += reverse_bytes;
 
         Some((
@@ -301,5 +356,24 @@ mod tests {
     #[test]
     fn from_bytes_too_short() {
         assert!(CodeMapper::from_bytes(&[0; 8]).is_none());
+    }
+
+    #[test]
+    fn build_with_supplementary_plane_chars() {
+        // Exercises the sparse/HashMap path: emoji sit well above
+        // FREQ_DENSE_THRESHOLD (65_536), so `max_label` forces the HashMap
+        // branch. Behaviour must be identical to the dense path.
+        let keys: Vec<Vec<char>> = vec![vec!['あ', '\u{1F600}'], vec!['\u{1F600}', '\u{1F680}']];
+        let cm = CodeMapper::build(&keys);
+        // 3 distinct labels + terminal.
+        assert_eq!(cm.alphabet_size(), 4);
+        // '\u{1F600}' appears twice → smaller code than the others.
+        let code_smile = cm.get('\u{1F600}');
+        let code_rocket = cm.get('\u{1F680}');
+        assert_ne!(code_smile, 0);
+        assert!(code_smile < code_rocket);
+        // Round trip still works.
+        assert_eq!(cm.reverse(code_smile), Some('\u{1F600}' as u32));
+        assert_eq!(cm.reverse(code_rocket), Some('\u{1F680}' as u32));
     }
 }

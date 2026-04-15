@@ -3,14 +3,22 @@ use crate::{CodeMapper, DoubleArray, Label, Node};
 /// Mutable state used during trie construction.
 struct BuildContext {
     nodes: Vec<Node>,
-    /// Flat list of (parent, child) edges recorded during recursion, in DFS
-    /// order. Converted to `child_offsets` + `children_list` at finalisation
-    /// via an O(N + E) count-and-scatter pass (no sort needed: scatter
-    /// preserves DFS insertion order within each parent, which matches the
-    /// desired code-ascending ordering because `build_rec` processes
-    /// children in that order).
+    /// Flat list of (parent, child) edges appended as children are placed.
+    /// The global order across parents is unspecified (the build walks the
+    /// trie with an iterative LIFO work stack), but the key invariant is
+    /// per-parent: all edges for a given parent are pushed together in a
+    /// single code-ascending sweep. Converted to `child_offsets` +
+    /// `children_list` at finalisation via an O(N + E) count-and-scatter
+    /// pass — no sort needed, because scatter preserves insertion order
+    /// within each parent bucket, which is exactly the code-ascending
+    /// ordering the final slice requires.
     edges: Vec<(u32, u32)>,
     free_list: FreeList,
+    /// Highest node index ever written to. Maintained incrementally as
+    /// children are placed so the final trailing-trim step is O(1) instead
+    /// of a reverse linear scan over `nodes`. Starts at 1 because the root
+    /// always lives at `nodes[1]` (index 0 is the sentinel).
+    max_used_idx: u32,
 }
 
 /// Doubly-linked circular free list for managing unused node slots.
@@ -115,6 +123,12 @@ impl BuildContext {
             nodes: vec![Node::default(); capacity],
             edges: Vec::new(),
             free_list,
+            // Root lives at index 1, so it is always considered "used"
+            // even before any descendants are placed. Every non-empty
+            // `build()` invocation places at least one terminal child
+            // (the single-empty-key case still encodes as `[terminal]`),
+            // which will bump this further.
+            max_used_idx: 1,
         }
     }
 
@@ -126,8 +140,17 @@ impl BuildContext {
         }
     }
 
-    /// Recursively places children for keys[begin..end] at the given depth.
-    fn build_rec(
+    /// Places all descendants for keys[begin..end] starting at `parent` and
+    /// `depth`, using an explicit stack of work frames instead of the call
+    /// stack. The iterative form avoids Rust stack overflow on pathologically
+    /// long keys (stack depth is bounded by the longest coded key length).
+    ///
+    /// Traversal order across parents differs from the recursive version
+    /// (LIFO instead of pre-order DFS), but each parent's edges are still
+    /// enqueued in one pass over the code-ascending `children` vector, so
+    /// the `children_list` slice per parent remains code-ascending after
+    /// the count-and-scatter flatten.
+    fn build_trie(
         &mut self,
         coded_keys: &[Vec<u32>],
         begin: usize,
@@ -135,53 +158,72 @@ impl BuildContext {
         depth: usize,
         parent: u32,
     ) {
-        // Collect distinct child labels and their key ranges. Keys arrive in
-        // byte-sorted order, but codes are frequency-assigned — so byte order
-        // and code order can disagree. Children are placed in code-ascending
-        // order (code 0 terminal first, then extensions) so that the final
-        // `children_list[child_offsets[parent]..]` slice carries the same
-        // ordering invariant.
-        let mut children: Vec<(u32, usize, usize)> = Vec::new();
-        let mut i = begin;
-        while i < end {
-            let code = coded_keys[i][depth];
-            let child_begin = i;
-            i += 1;
-            while i < end && coded_keys[i][depth] == code {
+        // Work frames: (begin, end, depth, parent). Capacity is left as the
+        // default heuristic. This is a push-all-children DFS, so the stack
+        // holds every not-yet-visited child across the current frontier —
+        // including pending sibling subtrees, not only frames along the
+        // path from the root. Peak depth is therefore bounded by the
+        // active frontier size, which for balanced tries stays modest but
+        // can grow with very wide branching.
+        let mut stack: Vec<(usize, usize, usize, u32)> = Vec::new();
+        stack.push((begin, end, depth, parent));
+
+        while let Some((begin, end, depth, parent)) = stack.pop() {
+            // Collect distinct child labels and their key ranges. Keys arrive
+            // in byte-sorted order, but codes are frequency-assigned — so byte
+            // order and code order can disagree. Children are placed in
+            // code-ascending order (code 0 terminal first, then extensions)
+            // so that the final `children_list[child_offsets[parent]..]`
+            // slice carries the same ordering invariant.
+            let mut children: Vec<(u32, usize, usize)> = Vec::new();
+            let mut i = begin;
+            while i < end {
+                let code = coded_keys[i][depth];
+                let child_begin = i;
                 i += 1;
+                while i < end && coded_keys[i][depth] == code {
+                    i += 1;
+                }
+                children.push((code, child_begin, i));
             }
-            children.push((code, child_begin, i));
-        }
-        children.sort_unstable_by_key(|&(code, _, _)| code);
+            children.sort_unstable_by_key(|&(code, _, _)| code);
 
-        // Find a base such that base XOR code is free for all children
-        let base = self.find_base(&children);
-        self.nodes[parent as usize].set_base(base);
+            // Find a base such that base XOR code is free for all children
+            let base = self.find_base(&children);
+            self.nodes[parent as usize].set_base(base);
 
-        // Place child nodes. `children` is sorted by code ascending, so
-        // pushing edges in this order preserves the code-ascending invariant
-        // within each parent's slice once the count-and-scatter flatten runs.
-        let mut child_indices: Vec<u32> = Vec::with_capacity(children.len());
-        for &(code, _, _) in &children {
-            let child_idx = base ^ code;
-            child_indices.push(child_idx);
-            self.free_list.remove(child_idx);
-            self.nodes[child_idx as usize].set_check(parent);
-            self.edges.push((parent, child_idx));
-        }
+            // Place child nodes. `children` is sorted by code ascending, so
+            // pushing edges in this order preserves the code-ascending
+            // invariant within each parent's slice once the count-and-scatter
+            // flatten runs.
+            let mut child_indices: Vec<u32> = Vec::with_capacity(children.len());
+            for &(code, _, _) in &children {
+                let child_idx = base ^ code;
+                child_indices.push(child_idx);
+                self.free_list.remove(child_idx);
+                self.nodes[child_idx as usize].set_check(parent);
+                self.edges.push((parent, child_idx));
+                // Track the high-water mark so `build` can trim trailing
+                // unused slots in O(1) instead of a reverse linear scan.
+                if child_idx > self.max_used_idx {
+                    self.max_used_idx = child_idx;
+                }
+            }
 
-        // Set leaf/has_leaf flags and recurse into non-terminal children
-        for (ci, &(code, child_begin, child_end)) in children.iter().enumerate() {
-            let child_idx = child_indices[ci];
-            if code == 0 {
-                // Terminal symbol — this is a leaf node
-                debug_assert_eq!(child_end - child_begin, 1);
-                let value_id = child_begin as u32;
-                self.nodes[child_idx as usize].set_leaf(value_id);
-                self.nodes[parent as usize].set_has_leaf();
-            } else {
-                // Non-terminal — recurse
-                self.build_rec(coded_keys, child_begin, child_end, depth + 1, child_idx);
+            // Set leaf/has_leaf flags and enqueue non-terminal children.
+            for (ci, &(code, child_begin, child_end)) in children.iter().enumerate() {
+                let child_idx = child_indices[ci];
+                if code == 0 {
+                    // Terminal symbol — this is a leaf node
+                    debug_assert_eq!(child_end - child_begin, 1);
+                    let value_id = child_begin as u32;
+                    self.nodes[child_idx as usize].set_leaf(value_id);
+                    self.nodes[parent as usize].set_has_leaf();
+                } else {
+                    // Non-terminal — push onto the work stack. The frame is
+                    // self-contained (coded_keys is borrowed outside the loop).
+                    stack.push((child_begin, child_end, depth + 1, child_idx));
+                }
             }
         }
     }
@@ -297,24 +339,20 @@ impl<L: Label> DoubleArray<L> {
         let mut ctx = BuildContext::new(initial_cap);
 
         // Root lives at index 1; index 0 is the invalid sentinel.
-        ctx.build_rec(&coded_keys, 0, keys.len(), 0, 1);
+        ctx.build_trie(&coded_keys, 0, keys.len(), 0, 1);
 
-        // Trim trailing unused nodes. Always keep at least [sentinel, root]
-        // even if the root happens to have base=0 (which makes the root node
-        // indistinguishable from Node::default() by value).
-        let last_used = ctx
-            .nodes
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, n)| *n != &Node::default())
-            .map(|(i, _)| i)
-            .unwrap_or(1);
+        // Trim trailing unused nodes. `max_used_idx` is maintained
+        // incrementally during child placement, so this is O(1) — no reverse
+        // scan over the (often heavily over-allocated) `nodes` vector. Always
+        // keep at least [sentinel, root] even if the root happens to have
+        // base=0, which would otherwise make it indistinguishable from
+        // `Node::default()` by value.
+        let last_used = ctx.max_used_idx as usize;
         let final_len = (last_used + 1).max(2);
         ctx.nodes.truncate(final_len);
 
         // Flatten edges into child_offsets (CSR, len N+1) + children_list (len E)
-        // via count-and-scatter — O(N + E), no sort. build_rec enqueues edges
+        // via count-and-scatter — O(N + E), no sort. build_trie enqueues edges
         // in code-ascending order per parent, and scatter preserves that
         // order because it writes consecutive slots as edges are read.
         let edge_count = ctx.edges.len();
@@ -608,6 +646,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    // 200k-char build runs ~100–1000× slower under Miri, effectively hangs
+    // the CI miri job. The non-Miri test still proves the iterative rewrite
+    // tolerates depths the recursive form could not — Miri can't catch a
+    // stack overflow anyway, so skipping costs nothing here.
+    #[cfg_attr(miri, ignore)]
+    fn build_handles_very_long_key_without_stack_overflow() {
+        // Regression: the recursive `build_rec` would blow the Rust stack on
+        // keys long enough that depth exceeded the default thread stack
+        // (roughly 8 MiB on macOS/Linux, which is typically a few × 10^4
+        // frames). The iterative rewrite uses a heap-allocated work stack,
+        // so depth is bounded only by available memory.
+        //
+        // 200_000 chars is well past the recursive limit but stays small
+        // enough to keep the test fast.
+        let long_key: Vec<u8> = std::iter::repeat_n(b'a', 200_000).collect();
+        let keys: Vec<&[u8]> = vec![&long_key];
+        let da = DoubleArray::<u8>::build(&keys);
+        assert!(da.num_nodes() > 1);
     }
 
     #[test]
