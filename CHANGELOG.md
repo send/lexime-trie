@@ -2,6 +2,88 @@
 
 All notable changes to this crate are documented in this file.
 
+## 0.4.0 — 2026-04-15
+
+Breaking release that tightens the public surface and adds an owning
+wrapper for the zero-copy view.
+
+### Breaking
+
+- **`TrieSearch` trait.** The five query methods previously defined
+  inherently on `DoubleArray` and `DoubleArrayRef` —
+  `exact_match`, `common_prefix_search`, `predictive_search`,
+  `probe`, `node_slot_count` — are now on the `TrieSearch<L>`
+  trait. Bring it into scope at call sites:
+  ```rust
+  use lexime_trie::{DoubleArray, TrieSearch};
+  ```
+  Generic code can now abstract over "owned" (`DoubleArray<L>`),
+  "borrowed" (`DoubleArrayRef<'_, L>`), and "owned-mmap"
+  (`DoubleArrayBacked<L, B>`) representations.
+- **`num_nodes()` → `node_slot_count()`.** The old name suggested
+  "number of live trie nodes", but the value returned is
+  `self.nodes.len()` — the slot count including sentinel and any
+  remaining free slots. The renamed method has docs explaining
+  exactly what it counts.
+- **`CodeMapper::reverse` returns `Option<L>`.** Previously it
+  returned `Option<u32>` and callers had to follow up with
+  `L::try_from`. The generic parameter is now on the method itself
+  and the conversion is folded in. (`CodeMapper` is internal in
+  0.4 — see below — but this also simplifies the trait
+  implementations inside the crate.)
+- **`CodeMapper` and `Node` are no longer public.** They were
+  re-exported from the crate root but carried internal layout
+  details. The 0.4 surface is limited to `DoubleArray`,
+  `DoubleArrayRef`, `DoubleArrayBacked`, `TrieSearch`, `Label`,
+  `PrefixMatch`, `SearchMatch`, `ProbeResult`, and `TrieError`.
+- **`Label::ALPHABET_SIZE` removed.** The constant was unused in
+  the crate and in lexime (its only known consumer). External
+  implementors of `Label` no longer need to define it.
+- **`CodeMapper::alphabet_size()` and `CodeMapper::as_bytes()`
+  removed.** Dead outside tests; `CodeMapper` itself is now
+  internal, so this is only observable through its deletion from
+  the re-export list.
+- **`Node::raw_base`, `Node::raw_check`, `Node::from_raw`
+  removed.** These existed for external serialisation callers
+  that never materialised.
+
+### Added
+
+- **`DoubleArrayBacked<L, B: AsRef<[u8]>>`.** A `DoubleArrayRef`
+  bundled with the byte buffer it borrows from. Removes the
+  self-referential-struct friction that forced consumers like
+  lexime to use `mem::transmute<DoubleArrayRef<'_, u8>,
+  DoubleArrayRef<'static, u8>>` to keep an mmap and its view in
+  the same owning struct. Backing can be anything satisfying
+  `AsRef<[u8]>` with a stable-on-move data pointer (`Vec<u8>`,
+  `Box<[u8]>`, `Arc<[u8]>`, `&'static [u8]`, `memmap2::Mmap`,
+  etc.). Implements `TrieSearch<L>`. Provides `as_view()` to
+  borrow the inner view and `into_backing()` to recover the
+  original buffer.
+- **`TrieSearch::validate_strict()`.** O(N) structural
+  validation: all cheap checks plus monotonicity of
+  `child_offsets`. Run this after loading from an untrusted
+  source to reject malformed buffers before any query. Not
+  invoked by `from_bytes` / `from_bytes_ref`.
+
+### Migration (0.3.x → 0.4.0)
+
+1. Add `use lexime_trie::TrieSearch;` at every call site of
+   `exact_match`, `common_prefix_search`, `predictive_search`,
+   `probe`, or `node_slot_count`. (The compiler will point this
+   out — the error message suggests the exact import.)
+2. Rename any `.num_nodes()` to `.node_slot_count()`.
+3. If you were matching on `lexime_trie::Node` or
+   `lexime_trie::CodeMapper`, you can no longer do so; these
+   types are internal in 0.4. No replacement is needed for
+   typical use — all trie operations are on the owner types.
+4. If you were keeping an mmap and a `DoubleArrayRef<'static,
+   L>` in the same struct via `mem::transmute`, replace that
+   pattern with `DoubleArrayBacked::new(mmap)`.
+
+Existing serialised buffers (v3 format, 0.3.0 and 0.3.1) load
+unchanged; the binary format itself is unchanged.
+
 ## 0.3.1 — 2026-04-15
 
 Non-breaking polish on top of 0.3.0. No public API changes.
