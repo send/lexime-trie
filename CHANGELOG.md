@@ -2,6 +2,39 @@
 
 All notable changes to this crate are documented in this file.
 
+## 0.3.1 — 2026-04-15
+
+Non-breaking polish on top of 0.3.0. No public API changes.
+
+### Internal
+
+- `DoubleArray::build` no longer recurses; the trie walk now uses an
+  explicit work stack, so very long keys (depth > a few × 10⁴) cannot
+  overflow the Rust stack at build time.
+- The trailing-trim pass at the end of `build` is now O(1) — the
+  build context tracks the highest used node index incrementally
+  instead of doing a reverse linear scan over `nodes` at finalisation.
+- `CodeMapper::build` falls back to a `HashMap`-based frequency count
+  when the dense path's `max_label + 1` would exceed 65 536 entries.
+  The persistent forward `table` is still allocated densely (it stays
+  on the search hot path), but the transient counting structure no
+  longer balloons to ~8 MiB on inputs that include emoji or other
+  supplementary-plane code points.
+
+### Safety / robustness
+
+- The four invariants in `serial::as_bytes` (count fields fitting in
+  `u32`, `child_offsets.len() == nodes.len() + 1`, code-map size in
+  range) are now checked in release builds. They are upheld by the
+  builder, but a future bug that violated them would otherwise wrap
+  silently via `as u32` and produce a buffer whose zero-copy load
+  would build slices over the wrong bounds.
+- `CodeMapper::write_to` and `from_bytes` no longer use `unsafe`; the
+  serialiser/deserialiser is expressed in terms of `to_le_bytes` /
+  `from_le_bytes` and slice operations. `serialized_size` and
+  `write_to` size arithmetic now use `checked_*`, matching the style
+  of `serial::as_bytes`.
+
 ## 0.3.0 — 2026-04-15
 
 ### Breaking
