@@ -12,7 +12,7 @@ Replaces `trie-rs` + `bincode` with a compact, cache-friendly trie that supports
 - **Terminal symbol approach** — cleanly handles keys that are both exact matches and prefixes of other keys
 - **Sibling chain (SoA)** — enables predictive search via DFS without increasing node size for other operations
 - **Fast serialization** — binary format with `LXTR` magic header, ~5ms copy-load
-- **Zero-copy deserialization** — `DoubleArrayRef` borrows nodes/siblings directly from mmap or byte buffer
+- **Zero-copy deserialization** — `DoubleArrayRef` borrows nodes and CSR child arrays directly from mmap or byte buffer
 
 ## Search Operations
 
@@ -72,7 +72,7 @@ let bytes: &mut [u8] = unsafe {
 };
 bytes.copy_from_slice(&raw);
 
-// Zero-copy: references nodes & siblings directly in the byte buffer
+// Zero-copy: references nodes and CSR child data (`child_offsets` + `children_list`) directly in the byte buffer
 let da_ref = DoubleArrayRef::<u8>::from_bytes(bytes).unwrap();
 assert_eq!(da_ref.exact_match(b"abc"), Some(0));
 

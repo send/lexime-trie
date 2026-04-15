@@ -111,20 +111,26 @@ pub trait TrieSearch<L: Label> {
     /// # Behaviour without validation
     ///
     /// Query paths (`exact_match`, `common_prefix_search`,
-    /// `predictive_search`, `probe`) are written to degrade
-    /// gracefully on malformed offsets or out-of-range
-    /// `children_list` entries: they use guarded indexing
-    /// (`slice::get` / `saturating_sub`) so corruption surfaces as
-    /// empty or partial results, never a panic and never UB.
+    /// `predictive_search`, `probe`) are written so corruption
+    /// surfaces as empty or partial results, never a panic and
+    /// never UB. Each hot path picks the defence suited to its
+    /// shape: the `base XOR code` traversal used by `exact_match`,
+    /// `common_prefix_search`, and the first step of the others
+    /// bounds-checks `next_idx < nodes.len()` explicitly before an
+    /// `unsafe` `get_unchecked`; `child_range_width` uses
+    /// `saturating_sub` so non-monotonic offsets yield zero rather
+    /// than wrap; and `predictive_search`'s CSR DFS uses
+    /// `slice::get` on both the offset window and each child node
+    /// lookup, so out-of-range entries are skipped silently.
     ///
     /// One caveat: `predictive_search` traverses the CSR children
     /// graph via an explicit stack without a visited set, so a
-    /// corruption pattern that happens to introduce a cycle can make
-    /// the iterator yield results indefinitely. The iterator still
-    /// does not panic and does not touch memory out of bounds, but
-    /// callers receiving buffers from untrusted sources should
-    /// either run `validate_strict` first or bound consumption with
-    /// `.take(N)`.
+    /// corruption pattern that happens to introduce a cycle can
+    /// make the iterator yield results indefinitely. The iterator
+    /// still does not panic and does not touch memory out of
+    /// bounds, but callers receiving buffers from untrusted sources
+    /// should either run `validate_strict` first or bound
+    /// consumption with `.take(N)`.
     ///
     /// ```
     /// use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};

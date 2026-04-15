@@ -237,13 +237,25 @@ impl<L: Label> DoubleArray<L> {
 /// Monotonicity is intentionally NOT checked here: it would be O(N) and
 /// defeat zero-copy deserialization for the `from_bytes` path. A
 /// non-monotonic or otherwise malformed offset cannot cause UB (Rust slice
-/// indexing is always bounds-checked) and does not panic either — query
-/// paths use guarded indexing (`.get()` / `saturating_sub`) that degrades
-/// corrupt regions to empty results. `predictive_search`'s DFS may
-/// however fail to terminate on a corruption pattern that happens to
-/// introduce a cycle in the CSR children graph (no visited set), so
-/// callers with untrusted buffers should run [`validate_strict`]
-/// explicitly or bound iteration with `.take(N)`.
+/// indexing is always bounds-checked) and does not panic either. Each
+/// query path defends against corruption through the strategy suited to
+/// its hot-path shape:
+///
+/// - `traverse` / `exact_match` / the `common_prefix_search` iterator
+///   follow `base XOR code` jumps and check `next_idx as usize < nodes.len()`
+///   explicitly before every `nodes.get_unchecked` access.
+/// - `probe` bounds-checks the terminal index it loads and calls
+///   `child_range_width`, which uses `saturating_sub` so non-monotonic
+///   offsets yield zero rather than wrap.
+/// - `predictive_search`'s DFS uses `.get()` on the `children_list`
+///   slice and `.get()` + let-else on each child node lookup, so
+///   out-of-range entries are skipped silently.
+///
+/// `predictive_search` is the sole exception to termination: its DFS has
+/// no visited set, so a corruption pattern that happens to introduce a
+/// cycle in the CSR children graph can loop indefinitely. Callers with
+/// untrusted buffers should run [`validate_strict`] explicitly or bound
+/// iteration with `.take(N)`.
 pub(crate) fn validate_cheap(
     nodes: &[Node],
     child_offsets: &[u32],
