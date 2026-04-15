@@ -36,7 +36,7 @@
 //! };
 //! bytes.copy_from_slice(&raw);
 //!
-//! let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(bytes).unwrap();
+//! let da_ref = DoubleArrayRef::<u8>::from_bytes(bytes).unwrap();
 //! assert_eq!(da_ref.exact_match(b"abc"), Some(2));
 //! ```
 
@@ -60,7 +60,7 @@ mod test_support;
 
 use std::marker::PhantomData;
 
-pub use backed::DoubleArrayBacked;
+pub use backed::{DoubleArrayBacked, StableBacking};
 pub use da_ref::DoubleArrayRef;
 pub use label::Label;
 pub use search::{PrefixMatch, ProbeResult, SearchMatch, TrieSearch};

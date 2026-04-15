@@ -96,9 +96,9 @@ pub trait TrieSearch<L: Label> {
     fn probe(&self, key: &[L]) -> ProbeResult;
 
     /// Full O(N) structural validation. Runs the cheap checks already
-    /// performed by `from_bytes` / `from_bytes_ref` (section lengths
-    /// and end offset) plus monotonicity of `child_offsets`, which
-    /// the zero-copy load path skips. Call this after loading a trie
+    /// performed by the `from_bytes` constructors (section lengths and
+    /// end offset) plus monotonicity of `child_offsets`, which the
+    /// zero-copy load path skips. Call this after loading a trie
     /// from an untrusted source to reject malformed inputs before
     /// issuing any queries; corrupted offsets cannot cause UB (Rust
     /// slice indexing is bounds-checked) but can produce wrong

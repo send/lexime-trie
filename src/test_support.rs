@@ -4,7 +4,7 @@
 //! per-module `mod tests` blocks, so this never contributes to the
 //! released library.
 
-/// 8-byte aligned byte buffer for `from_bytes_ref` tests.
+/// 8-byte aligned byte buffer for `from_bytes` tests.
 ///
 /// `Vec<u8>` only guarantees 1-byte alignment. Standard allocators
 /// happen to return 8- or 16-byte aligned memory, but Miri's allocator
@@ -52,3 +52,8 @@ impl AsRef<[u8]> for AlignedBytes {
         self.as_slice()
     }
 }
+
+// SAFETY: `AlignedBytes` stores its payload in a `Vec<u64>`, whose heap
+// buffer address is stable across moves of the struct. The slice returned
+// by `as_ref` points into that heap allocation.
+unsafe impl crate::StableBacking for AlignedBytes {}

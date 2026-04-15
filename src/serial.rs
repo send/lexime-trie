@@ -144,7 +144,7 @@ impl<L: Label> DoubleArray<L> {
         // constructed `DoubleArray`, but we check in release anyway: if a
         // future refactor ever broke the invariant, the `as u32` truncation
         // below would produce a buffer whose header claims fewer elements
-        // than the payload contains. `from_bytes_ref` would then build a
+        // than the payload contains. `from_bytes` would then build a
         // slice over truncated bounds, and the extra bytes would be
         // silently treated as a different section. Asserting here keeps
         // that class of corruption from ever escaping into a serialized
@@ -235,7 +235,7 @@ impl<L: Label> DoubleArray<L> {
 /// - `child_offsets[N] == children_list.len()`
 ///
 /// Monotonicity is intentionally NOT checked here: it would be O(N) and
-/// defeat zero-copy deserialization for the `from_bytes_ref` path. A
+/// defeat zero-copy deserialization for the `from_bytes` path. A
 /// non-monotonic or otherwise malformed offset cannot cause UB (Rust slice
 /// indexing is always bounds-checked — corruption surfaces as a panic on
 /// query, never as memory unsafety). Callers that need hard guarantees can
@@ -259,7 +259,7 @@ pub(crate) fn validate_cheap(
 
 /// Full O(N) validation: cheap checks + monotonicity of `child_offsets`.
 ///
-/// Not invoked by `from_bytes` / `from_bytes_ref`. Exposed to callers via
+/// Not invoked by either `from_bytes` constructor. Exposed to callers via
 /// `TrieSearch::validate_strict` so they can opt into hard guarantees —
 /// useful when loading trie bytes from an untrusted source where a wrapped
 /// zero-copy slice with non-monotonic offsets could otherwise produce
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn validate_strict_rejects_non_monotonic_child_offsets() {
-        // The load path (from_bytes / from_bytes_ref) deliberately skips the
+        // The load path (owned + zero-copy `from_bytes`) deliberately skips the
         // O(N) monotonicity check to keep zero-copy deserialization O(1).
         // `validate_strict` is the opt-in O(N) path callers can run when
         // they need to reject malformed input before any query.

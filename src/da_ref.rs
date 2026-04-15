@@ -38,7 +38,7 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// Returns [`TrieError::MisalignedData`] if the buffer is not properly aligned.
     /// Returns [`TrieError::TruncatedData`] if the buffer is too short or the
     /// CSR structural invariants are violated.
-    pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, TrieError> {
         let header = HeaderV3::parse(bytes)?;
 
         let nodes_ptr = bytes[header.nodes_offset()..].as_ptr();
@@ -167,7 +167,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
         let da = build_u8(&keys);
         let buf = AlignedBytes::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
 
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(da_ref.exact_match(key), Some(i as u32));
@@ -180,7 +180,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
         let da = build_u8(&keys);
         let buf = AlignedBytes::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
 
         let results: Vec<PrefixMatch> = da_ref.common_prefix_search(b"abcd").collect();
         assert_eq!(results.len(), 3);
@@ -194,7 +194,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
         let da = build_u8(&keys);
         let buf = AlignedBytes::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
 
         let results: Vec<SearchMatch<u8>> = da_ref.predictive_search(b"a").collect();
         let mut value_ids: Vec<u32> = results.iter().map(|r| r.value_id).collect();
@@ -207,7 +207,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
         let buf = AlignedBytes::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
 
         let r = da_ref.probe(b"a");
         assert_eq!(r.value, Some(0));
@@ -232,7 +232,7 @@ mod tests {
         ];
         let da = DoubleArray::<char>::build(&keys);
         let buf = AlignedBytes::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<char>::from_bytes_ref(buf.as_slice()).unwrap();
+        let da_ref = DoubleArrayRef::<char>::from_bytes(buf.as_slice()).unwrap();
 
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(da_ref.exact_match(key), Some(i as u32));
@@ -244,7 +244,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
         let buf = AlignedBytes::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
         let da_owned = da_ref.to_owned();
 
         for (i, key) in keys.iter().enumerate() {
@@ -278,7 +278,7 @@ mod tests {
         let misaligned_slice = &buf[offset..offset + bytes.len()];
 
         assert!(matches!(
-            DoubleArrayRef::<u8>::from_bytes_ref(misaligned_slice),
+            DoubleArrayRef::<u8>::from_bytes(misaligned_slice),
             Err(TrieError::MisalignedData)
         ));
     }
@@ -290,7 +290,7 @@ mod tests {
         let mut bytes = da.as_bytes();
         bytes[4] = 99; // bogus version
         assert!(matches!(
-            DoubleArrayRef::<u8>::from_bytes_ref(&bytes),
+            DoubleArrayRef::<u8>::from_bytes(&bytes),
             Err(TrieError::InvalidVersion)
         ));
     }
@@ -303,13 +303,13 @@ mod tests {
 
         // Truncate to less than header
         assert!(matches!(
-            DoubleArrayRef::<u8>::from_bytes_ref(&bytes[..10]),
+            DoubleArrayRef::<u8>::from_bytes(&bytes[..10]),
             Err(TrieError::TruncatedData)
         ));
 
         // Truncate data section
         assert!(matches!(
-            DoubleArrayRef::<u8>::from_bytes_ref(&bytes[..24]),
+            DoubleArrayRef::<u8>::from_bytes(&bytes[..24]),
             Err(TrieError::TruncatedData)
         ));
     }
@@ -319,7 +319,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
         let buf = AlignedBytes::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
         assert_eq!(da_ref.node_slot_count(), da.node_slot_count());
     }
 }

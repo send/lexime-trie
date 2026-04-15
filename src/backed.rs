@@ -1,5 +1,71 @@
 use crate::{DoubleArrayRef, Label, PrefixMatch, ProbeResult, SearchMatch, TrieError, TrieSearch};
 
+/// Marker trait for byte buffers whose data pointer is stable across
+/// moves of the buffer itself.
+///
+/// [`DoubleArrayBacked`] stores a raw pointer derived from
+/// `backing.as_ref()` and reuses it for the lifetime of the owner, so
+/// the pointer must remain valid after `backing` is moved into the
+/// outer struct. Implementors guarantee:
+///
+/// 1. `<Self as AsRef<[u8]>>::as_ref(&self).as_ptr()` stays at the
+///    same address across moves of `self`.
+/// 2. The pointed-to bytes do not change after construction (no
+///    interior mutability that could race with the stored view).
+///
+/// # Safety
+///
+/// Implementing this trait for a type that does not uphold (1) or
+/// (2) makes [`DoubleArrayBacked::from_backing`] unsound.
+///
+/// # Pre-blessed types
+///
+/// Implementations are provided for every common heap-backed
+/// byte-buffer type: `Vec<u8>`, `Box<[u8]>`, `Arc<[u8]>`, `Rc<[u8]>`,
+/// and shared byte slices (`&[u8]`). These all store their payload
+/// in the heap (or static memory) while holding only a fat-pointer
+/// header in the stack slot that moves — so their `as_ref()` pointer
+/// is inherently stable.
+///
+/// # Wrapping external types
+///
+/// To use a non-blessed type (most notably `memmap2::Mmap`), define
+/// a newtype in your crate and implement both `AsRef<[u8]>` and this
+/// trait:
+///
+/// ```no_run
+/// # type Mmap = &'static [u8]; // illustrative stand-in
+/// use lexime_trie::StableBacking;
+///
+/// struct OwnedMmap(Mmap);
+/// impl AsRef<[u8]> for OwnedMmap {
+///     fn as_ref(&self) -> &[u8] { self.0.as_ref() }
+/// }
+/// // SAFETY: `memmap2::Mmap` holds an OS-owned page mapping behind
+/// // a stable handle; moving the handle does not relocate the data.
+/// unsafe impl StableBacking for OwnedMmap {}
+/// ```
+///
+/// # What breaks (1) or (2)
+///
+/// Inline-storage types such as owned byte arrays (`[u8; N]`) and
+/// the inline mode of `SmallVec` / `tinyvec` / `heapless::Vec` keep
+/// the payload *inside* `Self`. Moving `Self` relocates the payload,
+/// invalidating any cached pointer. Do not implement this trait for
+/// such types.
+pub unsafe trait StableBacking: AsRef<[u8]> {}
+
+// Heap-backed: payload lives on the heap; moving the owner copies
+// only the fat-pointer header.
+unsafe impl StableBacking for Vec<u8> {}
+unsafe impl StableBacking for Box<[u8]> {}
+unsafe impl StableBacking for std::sync::Arc<[u8]> {}
+unsafe impl StableBacking for std::rc::Rc<[u8]> {}
+
+// Reference-based: the data lives wherever the reference points; the
+// reference itself is trivially copy-stable.
+unsafe impl StableBacking for &[u8] {}
+
 /// A [`DoubleArrayRef`] bundled together with the byte buffer it borrows from.
 ///
 /// Use this when you want a self-contained, movable trie value that owns
@@ -15,7 +81,7 @@ use crate::{DoubleArrayRef, Label, PrefixMatch, ProbeResult, SearchMatch, TrieEr
 ///
 /// let file = File::open("trie.bin")?;
 /// let mmap = map(&file)?;
-/// let trie: DoubleArrayBacked<u8, Mmap> = DoubleArrayBacked::new(mmap)?;
+/// let trie: DoubleArrayBacked<u8, Mmap> = DoubleArrayBacked::from_backing(mmap)?;
 /// assert!(trie.exact_match(b"hello").is_some());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -28,14 +94,13 @@ use crate::{DoubleArrayRef, Label, PrefixMatch, ProbeResult, SearchMatch, TrieEr
 ///
 /// # Backing requirements
 ///
-/// `B: AsRef<[u8]>` must return a slice whose *data* address is stable
-/// across moves of `B`. This is true for every heap-backed type
-/// (`Vec<u8>`, `Box<[u8]>`, `Arc<[u8]>`), shared byte references
-/// (`&'static [u8]`), and OS-owned mappings like `memmap2::Mmap`. It is
-/// **not** true for inline-stored types such as owned arrays `[u8; N]`,
-/// whose data lives alongside `B` itself and would be invalidated by
-/// moving `B` into this struct.
-pub struct DoubleArrayBacked<L: Label, B: AsRef<[u8]>> {
+/// `B: StableBacking` enforces at the type level that `backing.as_ref()`
+/// returns a slice whose data address is stable across moves of `B`.
+/// Pre-blessed implementations exist for `Vec<u8>`, `Box<[u8]>`,
+/// `Arc<[u8]>`, `Rc<[u8]>`, and shared slices `&[u8]`. To wrap an
+/// external type such as `memmap2::Mmap`, see the [`StableBacking`]
+/// trait docs for the newtype + `unsafe impl` pattern.
+pub struct DoubleArrayBacked<L: Label, B: StableBacking> {
     // DROP ORDER (load-bearing): `view` borrows into `backing`, so
     // `view` must be dropped before `backing`. Rust drops fields in
     // declaration order, so `view` comes first.
@@ -43,25 +108,23 @@ pub struct DoubleArrayBacked<L: Label, B: AsRef<[u8]>> {
     backing: B,
 }
 
-impl<L: Label, B: AsRef<[u8]>> DoubleArrayBacked<L, B> {
+impl<L: Label, B: StableBacking> DoubleArrayBacked<L, B> {
     /// Parse `backing` as a v3 trie buffer and bundle the two together.
     ///
-    /// Returns the same errors as [`DoubleArrayRef::from_bytes_ref`].
-    pub fn new(backing: B) -> Result<Self, TrieError> {
-        // Borrow the backing to parse it. The resulting slice address
-        // is tied to `backing`'s current location; once we move
-        // `backing` into `Self` below, that location must remain stable
-        // (see the type-level docs on backing requirements).
+    /// Returns the same errors as [`DoubleArrayRef::from_bytes`].
+    pub fn from_backing(backing: B) -> Result<Self, TrieError> {
         let bytes: &[u8] = backing.as_ref();
         // SAFETY: We synthesise a `'static` lifetime to store alongside
-        // `backing` in the same struct. The lifetime never leaks to
-        // callers — `TrieSearch` methods only expose borrows tied to
-        // `&self` — and Rust's declaration-order drop guarantees that
-        // `view` drops before `backing`, so the pointer is never
-        // dereferenced after `backing` goes away.
+        // `backing` in the same struct. The `B: StableBacking` bound
+        // guarantees that `bytes.as_ptr()` remains valid after `backing`
+        // is moved into `Self` below. The synthesised lifetime never
+        // leaks to callers — `TrieSearch` methods only expose borrows
+        // tied to `&self` — and Rust's declaration-order drop puts
+        // `view` before `backing`, so the pointer is never dereferenced
+        // after `backing` is destroyed.
         let bytes_static: &'static [u8] =
             unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
-        let view = DoubleArrayRef::from_bytes_ref(bytes_static)?;
+        let view = DoubleArrayRef::from_bytes(bytes_static)?;
         Ok(Self { view, backing })
     }
 
@@ -84,7 +147,7 @@ impl<L: Label, B: AsRef<[u8]>> DoubleArrayBacked<L, B> {
     }
 }
 
-impl<L: Label, B: AsRef<[u8]>> TrieSearch<L> for DoubleArrayBacked<L, B> {
+impl<L: Label, B: StableBacking> TrieSearch<L> for DoubleArrayBacked<L, B> {
     #[inline]
     fn node_slot_count(&self) -> usize {
         self.view.node_slot_count()
@@ -131,7 +194,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
         let da = DoubleArray::<u8>::build(&keys);
         let backing = AlignedBytes::new(&da.as_bytes());
-        let trie: DoubleArrayBacked<u8, _> = DoubleArrayBacked::new(backing).unwrap();
+        let trie: DoubleArrayBacked<u8, _> = DoubleArrayBacked::from_backing(backing).unwrap();
 
         for (i, k) in keys.iter().enumerate() {
             assert_eq!(trie.exact_match(k), Some(i as u32));
@@ -144,7 +207,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
         let da = DoubleArray::<u8>::build(&keys);
         let backing = AlignedBytes::new(&da.as_bytes());
-        let trie: DoubleArrayBacked<u8, _> = DoubleArrayBacked::new(backing).unwrap();
+        let trie: DoubleArrayBacked<u8, _> = DoubleArrayBacked::from_backing(backing).unwrap();
 
         let count = trie.predictive_search(b"a").count();
         assert_eq!(count, 3);
@@ -158,7 +221,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"hello", b"world"];
         let da = DoubleArray::<u8>::build(&keys);
         let backing = AlignedBytes::new(&da.as_bytes());
-        let trie = DoubleArrayBacked::<u8, _>::new(backing).unwrap();
+        let trie = DoubleArrayBacked::<u8, _>::from_backing(backing).unwrap();
 
         fn take(t: DoubleArrayBacked<u8, AlignedBytes>) -> Option<u32> {
             t.exact_match(b"hello")
@@ -172,7 +235,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"a", b"b"];
         let da = DoubleArray::<u8>::build(&keys);
         let backing = AlignedBytes::new(&da.as_bytes());
-        let trie = DoubleArrayBacked::<u8, _>::new(backing).unwrap();
+        let trie = DoubleArrayBacked::<u8, _>::from_backing(backing).unwrap();
         let inner: &DoubleArrayRef<'_, u8> = trie.as_view();
         assert_eq!(inner.node_slot_count(), trie.node_slot_count());
     }
@@ -183,14 +246,14 @@ mod tests {
         let da = DoubleArray::<u8>::build(&keys);
         let backing = AlignedBytes::new(&da.as_bytes());
         let expected_len = backing.len();
-        let trie = DoubleArrayBacked::<u8, _>::new(backing).unwrap();
+        let trie = DoubleArrayBacked::<u8, _>::from_backing(backing).unwrap();
         let recovered = trie.into_backing();
         assert_eq!(recovered.len(), expected_len);
     }
 
     #[test]
     fn backed_invalid_bytes_returns_error() {
-        let trie = DoubleArrayBacked::<u8, _>::new(AlignedBytes::new(b"garbage"));
+        let trie = DoubleArrayBacked::<u8, _>::from_backing(AlignedBytes::new(b"garbage"));
         assert!(trie.is_err());
     }
 }
