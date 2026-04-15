@@ -36,11 +36,11 @@ use crate::{DoubleArrayRef, Label, PrefixMatch, ProbeResult, SearchMatch, TrieEr
 /// whose data lives alongside `B` itself and would be invalidated by
 /// moving `B` into this struct.
 pub struct DoubleArrayBacked<L: Label, B: AsRef<[u8]>> {
-    // DROP ORDER (load-bearing): `view` borrows into `_backing`, so
-    // `view` must be dropped before `_backing`. Rust drops fields in
+    // DROP ORDER (load-bearing): `view` borrows into `backing`, so
+    // `view` must be dropped before `backing`. Rust drops fields in
     // declaration order, so `view` comes first.
     view: DoubleArrayRef<'static, L>,
-    _backing: B,
+    backing: B,
 }
 
 impl<L: Label, B: AsRef<[u8]>> DoubleArrayBacked<L, B> {
@@ -57,31 +57,21 @@ impl<L: Label, B: AsRef<[u8]>> DoubleArrayBacked<L, B> {
         // `backing` in the same struct. The lifetime never leaks to
         // callers — `TrieSearch` methods only expose borrows tied to
         // `&self` — and Rust's declaration-order drop guarantees that
-        // `view` drops before `_backing`, so the pointer is never
+        // `view` drops before `backing`, so the pointer is never
         // dereferenced after `backing` goes away.
         let bytes_static: &'static [u8] =
             unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
         let view = DoubleArrayRef::from_bytes_ref(bytes_static)?;
-        Ok(Self {
-            view,
-            _backing: backing,
-        })
+        Ok(Self { view, backing })
     }
 
     /// Borrow the inner zero-copy view. The returned reference is
     /// lifetime-tied to `&self`, so the internal `'static` lifetime
-    /// placeholder never leaks to callers.
+    /// placeholder never leaks to callers — the compiler shortens it
+    /// via the usual subtyping on shared references.
     #[inline]
     pub fn as_view(&self) -> &DoubleArrayRef<'_, L> {
-        // Shorten the internal `'static` lifetime down to `&self`'s
-        // lifetime. This is always sound — lifetimes on shared
-        // references are covariant — and `transmute` is the simplest
-        // way to express it without threading another lifetime param.
-        //
-        // SAFETY: covariant lifetime shrink on a shared reference.
-        unsafe {
-            std::mem::transmute::<&DoubleArrayRef<'static, L>, &DoubleArrayRef<'_, L>>(&self.view)
-        }
+        &self.view
     }
 
     /// Consume this wrapper and return the backing buffer.
@@ -90,7 +80,7 @@ impl<L: Label, B: AsRef<[u8]>> DoubleArrayBacked<L, B> {
     /// re-used for another purpose or dropped on its own.
     #[inline]
     pub fn into_backing(self) -> B {
-        self._backing
+        self.backing
     }
 }
 
@@ -133,43 +123,14 @@ impl<L: Label, B: AsRef<[u8]>> TrieSearch<L> for DoubleArrayBacked<L, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::AlignedBytes;
     use crate::DoubleArray;
-
-    // 8-byte aligned backing with explicit AsRef<[u8]>.
-    struct AlignedBacking {
-        buf: Vec<u64>,
-        len: usize,
-    }
-    impl AlignedBacking {
-        fn new(bytes: &[u8]) -> Self {
-            let n = bytes.len().div_ceil(8);
-            let mut buf = vec![0u64; n];
-            // SAFETY: u64 has no invalid bit patterns.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    buf.as_mut_ptr() as *mut u8,
-                    bytes.len(),
-                );
-            }
-            Self {
-                buf,
-                len: bytes.len(),
-            }
-        }
-    }
-    impl AsRef<[u8]> for AlignedBacking {
-        fn as_ref(&self) -> &[u8] {
-            // SAFETY: len ≤ buf.len() * 8.
-            unsafe { std::slice::from_raw_parts(self.buf.as_ptr() as *const u8, self.len) }
-        }
-    }
 
     #[test]
     fn backed_exact_match() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
         let da = DoubleArray::<u8>::build(&keys);
-        let backing = AlignedBacking::new(&da.as_bytes());
+        let backing = AlignedBytes::new(&da.as_bytes());
         let trie: DoubleArrayBacked<u8, _> = DoubleArrayBacked::new(backing).unwrap();
 
         for (i, k) in keys.iter().enumerate() {
@@ -182,7 +143,7 @@ mod tests {
     fn backed_predictive_search() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
         let da = DoubleArray::<u8>::build(&keys);
-        let backing = AlignedBacking::new(&da.as_bytes());
+        let backing = AlignedBytes::new(&da.as_bytes());
         let trie: DoubleArrayBacked<u8, _> = DoubleArrayBacked::new(backing).unwrap();
 
         let count = trie.predictive_search(b"a").count();
@@ -196,10 +157,10 @@ mod tests {
         // trip Miri.
         let keys: Vec<&[u8]> = vec![b"hello", b"world"];
         let da = DoubleArray::<u8>::build(&keys);
-        let backing = AlignedBacking::new(&da.as_bytes());
+        let backing = AlignedBytes::new(&da.as_bytes());
         let trie = DoubleArrayBacked::<u8, _>::new(backing).unwrap();
 
-        fn take(t: DoubleArrayBacked<u8, AlignedBacking>) -> Option<u32> {
+        fn take(t: DoubleArrayBacked<u8, AlignedBytes>) -> Option<u32> {
             t.exact_match(b"hello")
         }
 
@@ -210,7 +171,7 @@ mod tests {
     fn backed_as_view_exposes_inner() {
         let keys: Vec<&[u8]> = vec![b"a", b"b"];
         let da = DoubleArray::<u8>::build(&keys);
-        let backing = AlignedBacking::new(&da.as_bytes());
+        let backing = AlignedBytes::new(&da.as_bytes());
         let trie = DoubleArrayBacked::<u8, _>::new(backing).unwrap();
         let inner: &DoubleArrayRef<'_, u8> = trie.as_view();
         assert_eq!(inner.node_slot_count(), trie.node_slot_count());
@@ -220,16 +181,16 @@ mod tests {
     fn backed_into_backing_returns_original() {
         let keys: Vec<&[u8]> = vec![b"x"];
         let da = DoubleArray::<u8>::build(&keys);
-        let backing = AlignedBacking::new(&da.as_bytes());
-        let expected_len = backing.len;
+        let backing = AlignedBytes::new(&da.as_bytes());
+        let expected_len = backing.len();
         let trie = DoubleArrayBacked::<u8, _>::new(backing).unwrap();
         let recovered = trie.into_backing();
-        assert_eq!(recovered.len, expected_len);
+        assert_eq!(recovered.len(), expected_len);
     }
 
     #[test]
     fn backed_invalid_bytes_returns_error() {
-        let trie = DoubleArrayBacked::<u8, _>::new(AlignedBacking::new(b"garbage"));
+        let trie = DoubleArrayBacked::<u8, _>::new(AlignedBytes::new(b"garbage"));
         assert!(trie.is_err());
     }
 }

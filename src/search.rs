@@ -59,7 +59,14 @@ pub struct ProbeResult {
 /// ```
 pub trait TrieSearch<L: Label> {
     /// Returns the number of node slots in the trie's underlying array.
-    /// See [`DoubleArray::node_slot_count`] for exact semantics.
+    ///
+    /// This is the length of the `nodes` vector after trailing-trim —
+    /// not the count of "live" nodes. The sentinel at index 0 and any
+    /// unused free slots embedded in the array are counted. For a trie
+    /// built from N keys with moderate branching, the slot count is
+    /// typically a small multiple of N (free slots between occupied
+    /// ones from the double-array XOR placement). Useful for sanity
+    /// checks and rough memory estimates.
     fn node_slot_count(&self) -> usize;
 
     /// Exact match search. Returns the `value_id` assigned at build time

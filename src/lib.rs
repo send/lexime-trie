@@ -55,6 +55,9 @@ mod search;
 mod serial;
 mod view;
 
+#[cfg(test)]
+mod test_support;
+
 use std::marker::PhantomData;
 
 pub use backed::DoubleArrayBacked;
@@ -126,21 +129,5 @@ impl<L: Label> DoubleArray<L> {
             code_map,
             _phantom: PhantomData,
         }
-    }
-
-    /// Returns the number of node slots in the trie's underlying array.
-    ///
-    /// This is the length of the `nodes` vector after trailing-trim —
-    /// not the number of "live" nodes. The sentinel at index 0 and any
-    /// unused free slots embedded in the array are counted. For a trie
-    /// built from N keys with moderate branching, slot count is typically
-    /// a small multiple of N (free slots between occupied ones from the
-    /// double-array XOR placement).
-    ///
-    /// Useful for sanity checks and rough memory estimates. For exact
-    /// live-node counts, iterate `self.nodes` and filter by
-    /// `!= Node::default()`.
-    pub fn node_slot_count(&self) -> usize {
-        self.nodes.len()
     }
 }

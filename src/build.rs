@@ -397,6 +397,7 @@ impl<L: Label> DoubleArray<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TrieSearch;
 
     #[test]
     fn build_empty() {

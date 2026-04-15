@@ -277,9 +277,8 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
                     });
                 } else {
                     // Extension child — push onto the DFS stack. `reverse`
-                    // yields `Option<L>` directly, handling both out-of-range
-                    // codes and any pathological u32 → L conversion failure
-                    // (the latter cannot occur in normal data).
+                    // silently skips out-of-range / unconvertible codes,
+                    // which can only surface from a corrupted buffer.
                     let child_code = base ^ c;
                     if let Some(l) = self.view.code_map.reverse::<L>(child_code) {
                         self.stack.push((c, depth, Some(l)));

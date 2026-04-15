@@ -156,50 +156,17 @@ impl<'a, L: Label> TrieSearch<L> for DoubleArrayRef<'a, L> {
 mod tests {
     use super::*;
 
+    use crate::test_support::AlignedBytes;
+
     fn build_u8(keys: &[&[u8]]) -> DoubleArray<u8> {
         DoubleArray::build(keys)
-    }
-
-    /// 8-byte aligned buffer for `from_bytes_ref` tests.
-    ///
-    /// `Vec<u8>::as_bytes()` only guarantees 1-byte alignment. Standard allocators
-    /// happen to return 8-16 byte aligned memory, but Miri's allocator does not.
-    /// This wrapper uses `Vec<u64>` as backing storage to guarantee 8-byte alignment.
-    struct AlignedBuffer {
-        _backing: Vec<u64>,
-        len: usize,
-    }
-
-    impl AlignedBuffer {
-        fn new(bytes: &[u8]) -> Self {
-            let n = bytes.len().div_ceil(8);
-            let mut backing = vec![0u64; n];
-            // SAFETY: copying bytes into a u64 buffer; u64 has no invalid bit patterns.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    backing.as_mut_ptr() as *mut u8,
-                    bytes.len(),
-                );
-            }
-            Self {
-                _backing: backing,
-                len: bytes.len(),
-            }
-        }
-
-        fn as_slice(&self) -> &[u8] {
-            // SAFETY: _backing is at least `self.len` bytes; u64 alignment (8)
-            // satisfies the Node/u32 alignment requirement (4).
-            unsafe { std::slice::from_raw_parts(self._backing.as_ptr() as *const u8, self.len) }
-        }
     }
 
     #[test]
     fn exact_match_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
+        let buf = AlignedBytes::new(&da.as_bytes());
         let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
 
         for (i, key) in keys.iter().enumerate() {
@@ -212,7 +179,7 @@ mod tests {
     fn common_prefix_search_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
+        let buf = AlignedBytes::new(&da.as_bytes());
         let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
 
         let results: Vec<PrefixMatch> = da_ref.common_prefix_search(b"abcd").collect();
@@ -226,7 +193,7 @@ mod tests {
     fn predictive_search_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
+        let buf = AlignedBytes::new(&da.as_bytes());
         let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
 
         let results: Vec<SearchMatch<u8>> = da_ref.predictive_search(b"a").collect();
@@ -239,7 +206,7 @@ mod tests {
     fn probe_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
+        let buf = AlignedBytes::new(&da.as_bytes());
         let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
 
         let r = da_ref.probe(b"a");
@@ -264,7 +231,7 @@ mod tests {
             "か".chars().collect(),
         ];
         let da = DoubleArray::<char>::build(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
+        let buf = AlignedBytes::new(&da.as_bytes());
         let da_ref = DoubleArrayRef::<char>::from_bytes_ref(buf.as_slice()).unwrap();
 
         for (i, key) in keys.iter().enumerate() {
@@ -276,7 +243,7 @@ mod tests {
     fn to_owned_works() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
+        let buf = AlignedBytes::new(&da.as_bytes());
         let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
         let da_owned = da_ref.to_owned();
 
@@ -351,7 +318,7 @@ mod tests {
     fn node_slot_count_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
+        let buf = AlignedBytes::new(&da.as_bytes());
         let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
         assert_eq!(da_ref.node_slot_count(), da.node_slot_count());
     }
