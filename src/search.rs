@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::view::TrieView;
-use crate::{DoubleArray, Label};
+use crate::{DoubleArray, Label, TrieError};
 
 /// Result of a common prefix search match.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,10 +30,130 @@ pub struct ProbeResult {
     pub has_children: bool,
 }
 
+/// Search and introspection operations shared by [`DoubleArray`] (owned),
+/// [`DoubleArrayRef`](crate::DoubleArrayRef) (zero-copy borrowed), and
+/// [`DoubleArrayBacked`](crate::DoubleArrayBacked) (owned-buffer wrapper).
+///
+/// **Not dyn-compatible.** `common_prefix_search` and `predictive_search`
+/// return `impl Iterator<...>` (RPIT), which is not permitted through a
+/// trait object. Use the trait as a bound on generic functions
+/// (`fn foo<T: TrieSearch<u8>>(t: &T)`) rather than `&dyn TrieSearch<u8>`.
+///
+/// Users should bring this trait into scope to call `exact_match`,
+/// `common_prefix_search`, `predictive_search`, or `probe` on any of
+/// the three trie representations:
+///
+/// ```
+/// use lexime_trie::{DoubleArray, TrieSearch};
+///
+/// let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
+/// let da = DoubleArray::<u8>::build(&keys);
+/// assert_eq!(da.exact_match(b"abc"), Some(2));
+/// ```
+///
+/// A generic function can then work over either representation:
+///
+/// ```
+/// use lexime_trie::{DoubleArray, TrieSearch};
+///
+/// fn count_hits<T: TrieSearch<u8>>(trie: &T, needles: &[&[u8]]) -> usize {
+///     needles.iter().filter(|k| trie.exact_match(k).is_some()).count()
+/// }
+///
+/// let da = DoubleArray::<u8>::build(&[b"abc".as_slice(), b"abd"]);
+/// assert_eq!(count_hits(&da, &[b"abc", b"xyz"]), 1);
+/// ```
+pub trait TrieSearch<L: Label> {
+    /// Returns the number of node slots in the trie's underlying array.
+    ///
+    /// This is the length of the `nodes` vector after trailing-trim —
+    /// not the count of "live" nodes. The sentinel at index 0 and any
+    /// unused free slots embedded in the array are counted. For a trie
+    /// built from N keys with moderate branching, the slot count is
+    /// typically a small multiple of N (free slots between occupied
+    /// ones from the double-array XOR placement). Useful for sanity
+    /// checks and rough memory estimates.
+    fn node_slot_count(&self) -> usize;
+
+    /// Exact match search. Returns the `value_id` assigned at build time
+    /// (i.e. the position in the original key slice) if the key exists,
+    /// `None` otherwise.
+    fn exact_match(&self, key: &[L]) -> Option<u32>;
+
+    /// Common prefix search: returns every prefix of `query` that exists
+    /// as a key in the trie, in prefix-length ascending order.
+    fn common_prefix_search<'a>(&'a self, query: &'a [L])
+        -> impl Iterator<Item = PrefixMatch> + 'a;
+
+    /// Predictive search: returns every key starting with `prefix`.
+    /// Keys are reconstructed from the trie structure via the CSR
+    /// children list; order is code-ascending per node (terminal first).
+    fn predictive_search<'a>(
+        &'a self,
+        prefix: &'a [L],
+    ) -> impl Iterator<Item = SearchMatch<L>> + 'a;
+
+    /// Probe a key for its existence and whether it is a prefix of other
+    /// stored keys. The four possible states of [`ProbeResult`]:
+    /// - `value=None, has_children=false`: key not in trie, not a prefix
+    /// - `value=None, has_children=true`: prefix-only
+    /// - `value=Some, has_children=false`: exact match, no extension
+    /// - `value=Some, has_children=true`: exact match and prefix
+    fn probe(&self, key: &[L]) -> ProbeResult;
+
+    /// Full O(N) structural validation. Runs the cheap checks already
+    /// performed by the `from_bytes` constructors (section lengths and
+    /// end offset) plus monotonicity of `child_offsets`, which the
+    /// zero-copy load path skips. Call this after loading a trie
+    /// from an untrusted source to surface malformed inputs as a
+    /// clean error instead of silently wrong results.
+    ///
+    /// # Behaviour without validation
+    ///
+    /// Query paths (`exact_match`, `common_prefix_search`,
+    /// `predictive_search`, `probe`) are written so corruption
+    /// surfaces as empty or partial results, never a panic and
+    /// never UB. Each hot path picks the defence suited to its
+    /// shape: the `base XOR code` traversal used by `exact_match`,
+    /// `common_prefix_search`, and the first step of the others
+    /// bounds-checks `next_idx < nodes.len()` explicitly before an
+    /// `unsafe` `get_unchecked`; `child_range_width` uses
+    /// `saturating_sub` so non-monotonic offsets yield zero rather
+    /// than wrap; and `predictive_search`'s CSR DFS uses
+    /// `slice::get` on both the offset window and each child node
+    /// lookup, so out-of-range entries are skipped silently.
+    ///
+    /// One caveat: `predictive_search` traverses the CSR children
+    /// graph via an explicit stack without a visited set, so a
+    /// corruption pattern that happens to introduce a cycle can
+    /// make the iterator yield results indefinitely. The iterator
+    /// still does not panic and does not touch memory out of
+    /// bounds, but callers receiving buffers from untrusted sources
+    /// should either run `validate_strict` first or bound
+    /// consumption with `.take(N)`.
+    ///
+    /// ```
+    /// use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};
+    ///
+    /// # let da = DoubleArray::<u8>::build(&[b"hello".as_slice()]);
+    /// # let bytes = da.as_bytes();
+    /// // Align the buffer; `mmap`'d regions already satisfy this.
+    /// let mut aligned = vec![0u32; bytes.len().div_ceil(4)];
+    /// let slice: &mut [u8] = unsafe {
+    ///     std::slice::from_raw_parts_mut(aligned.as_mut_ptr() as *mut u8, bytes.len())
+    /// };
+    /// slice.copy_from_slice(&bytes);
+    /// let trie = DoubleArrayRef::<u8>::from_bytes(slice)?;
+    /// trie.validate_strict()?;
+    /// # Ok::<(), lexime_trie::TrieError>(())
+    /// ```
+    fn validate_strict(&self) -> Result<(), TrieError>;
+}
+
 impl<L: Label> DoubleArray<L> {
     /// Returns a `TrieView` borrowing this trie's data.
     #[inline]
-    fn view(&self) -> TrieView<'_, L> {
+    pub(crate) fn view(&self) -> TrieView<'_, L> {
         TrieView {
             nodes: &self.nodes,
             child_offsets: &self.child_offsets,
@@ -42,43 +162,40 @@ impl<L: Label> DoubleArray<L> {
             _phantom: PhantomData,
         }
     }
+}
 
-    /// Exact match search. Returns the value_id if the key exists.
+impl<L: Label> TrieSearch<L> for DoubleArray<L> {
     #[inline]
-    pub fn exact_match(&self, key: &[L]) -> Option<u32> {
+    fn node_slot_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    #[inline]
+    fn exact_match(&self, key: &[L]) -> Option<u32> {
         self.view().exact_match(key)
     }
 
-    /// Common prefix search. Returns an iterator over all prefixes of `query`
-    /// that exist as keys in the trie.
-    pub fn common_prefix_search<'a>(
+    fn common_prefix_search<'a>(
         &'a self,
         query: &'a [L],
     ) -> impl Iterator<Item = PrefixMatch> + 'a {
         self.view().common_prefix_search(query)
     }
 
-    /// Predictive search. Returns an iterator over all keys that start with `prefix`.
-    ///
-    /// Uses sibling chain DFS to enumerate all keys sharing the given prefix.
-    /// Keys are reconstructed using `CodeMapper::reverse`.
-    pub fn predictive_search<'a>(
+    fn predictive_search<'a>(
         &'a self,
         prefix: &'a [L],
     ) -> impl Iterator<Item = SearchMatch<L>> + 'a {
         self.view().predictive_search(prefix)
     }
 
-    /// Probe a key. Returns whether the key exists and whether it has children.
-    ///
-    /// The 4 possible states:
-    /// - `None`: key not in trie, not a prefix of any key
-    /// - `Prefix`: key is a prefix of other keys but not a key itself
-    /// - `Exact`: key exists but is not a prefix of other keys
-    /// - `ExactAndPrefix`: key exists and is also a prefix of other keys
     #[inline]
-    pub fn probe(&self, key: &[L]) -> ProbeResult {
+    fn probe(&self, key: &[L]) -> ProbeResult {
         self.view().probe(key)
+    }
+
+    fn validate_strict(&self) -> Result<(), TrieError> {
+        crate::serial::validate_strict(&self.nodes, &self.child_offsets, &self.children_list)
     }
 }
 
@@ -502,5 +619,88 @@ mod tests {
                 has_children: false,
             }
         );
+    }
+
+    #[test]
+    fn validate_strict_on_built_trie_passes() {
+        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
+        let da = build_u8(&keys);
+        assert!(da.validate_strict().is_ok());
+    }
+
+    // === corruption robustness ===
+    //
+    // Query paths must not panic on buffers that pass `validate_cheap`
+    // but fail `validate_strict` (non-monotonic `child_offsets`) or on
+    // buffers whose `children_list` contains out-of-range node indices.
+    // These tests pin the no-panic guarantee.
+    //
+    // Note: termination is *not* guaranteed on pathological corruption
+    // — a non-monotonic offset range can happen to include children
+    // entries that form a cycle in the DFS graph, and the query paths
+    // have no visited set. The tests cap iteration with `take(N)` so a
+    // hypothetical cycle still produces a finite test run; the point
+    // is to prove the query does not panic and does not write OOB, not
+    // that it always terminates. Callers who receive untrusted buffers
+    // should run `validate_strict` before querying.
+
+    const MAX_CORRUPT_ITERS: usize = 256;
+
+    #[test]
+    fn predictive_search_survives_non_monotonic_child_offsets() {
+        // Build a valid trie, then hand-build a corrupted DoubleArray
+        // that reuses the same nodes/children but has a non-monotonic
+        // `child_offsets` (passes `validate_cheap`'s length/endpoint
+        // checks, fails `validate_strict`'s monotonicity check).
+        let good = build_u8(&[b"a", b"ab", b"abc"]);
+        let view = good.view();
+        let nodes = view.nodes.to_vec();
+        let children_list = view.children_list.to_vec();
+        let mut child_offsets = view.child_offsets.to_vec();
+        // Swap two interior entries to break monotonicity without
+        // changing the first (must be 0) or last (must equal
+        // `children_list.len()`) entry — those are enforced by
+        // `validate_cheap` and would reject the buffer upstream.
+        let n = child_offsets.len();
+        assert!(n >= 4);
+        child_offsets.swap(1, n - 2);
+        let code_map = good.code_map.clone();
+        let corrupt = DoubleArray::<u8>::new(nodes, child_offsets, children_list, code_map);
+
+        // Sanity: `validate_strict` rejects this, proving the buffer is
+        // genuinely malformed.
+        assert!(corrupt.validate_strict().is_err());
+        // `take` guards against the cycle case described in the module
+        // comment; the real assertion is "this line does not panic".
+        let _ = corrupt
+            .predictive_search(b"a")
+            .take(MAX_CORRUPT_ITERS)
+            .count();
+    }
+
+    #[test]
+    fn predictive_search_survives_out_of_range_children_entry() {
+        // Poison `children_list` with a node index past `nodes.len()`.
+        // `validate_cheap` does not catch this (it only checks
+        // `child_offsets` invariants); `validate_strict` does not
+        // catch it either. The query must still not panic.
+        let good = build_u8(&[b"a", b"ab"]);
+        let view = good.view();
+        let nodes = view.nodes.to_vec();
+        let child_offsets = view.child_offsets.to_vec();
+        let mut children_list = view.children_list.to_vec();
+        assert!(!children_list.is_empty());
+        children_list[0] = u32::MAX; // definitely out of range
+        let code_map = good.code_map.clone();
+        let corrupt = DoubleArray::<u8>::new(nodes, child_offsets, children_list, code_map);
+
+        let _ = corrupt
+            .predictive_search(b"")
+            .take(MAX_CORRUPT_ITERS)
+            .count();
+        let _ = corrupt
+            .predictive_search(b"a")
+            .take(MAX_CORRUPT_ITERS)
+            .count();
     }
 }

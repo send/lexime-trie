@@ -12,7 +12,7 @@ Replaces `trie-rs` + `bincode` with a compact, cache-friendly trie that supports
 - **Terminal symbol approach** — cleanly handles keys that are both exact matches and prefixes of other keys
 - **Sibling chain (SoA)** — enables predictive search via DFS without increasing node size for other operations
 - **Fast serialization** — binary format with `LXTR` magic header, ~5ms copy-load
-- **Zero-copy deserialization** — `DoubleArrayRef` borrows nodes/siblings directly from mmap or byte buffer
+- **Zero-copy deserialization** — `DoubleArrayRef` borrows nodes and CSR child arrays directly from mmap or byte buffer
 
 ## Search Operations
 
@@ -26,7 +26,7 @@ Replaces `trie-rs` + `bincode` with a compact, cache-friendly trie that supports
 ## Usage
 
 ```rust
-use lexime_trie::DoubleArray;
+use lexime_trie::{DoubleArray, TrieSearch};
 
 // Build from sorted keys (value_id = index)
 let da = DoubleArray::<u8>::build(&[b"abc", b"abd", b"xyz"]);
@@ -59,7 +59,7 @@ let da2 = DoubleArray::<u8>::from_bytes(&bytes).unwrap();
 The input buffer must be aligned to at least 4 bytes. Buffers from `mmap` or page-aligned allocations satisfy this requirement.
 
 ```rust
-use lexime_trie::{DoubleArray, DoubleArrayRef};
+use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};
 
 let da = DoubleArray::<u8>::build(&[b"abc", b"abd", b"xyz"]);
 let raw = da.as_bytes();
@@ -72,13 +72,17 @@ let bytes: &mut [u8] = unsafe {
 };
 bytes.copy_from_slice(&raw);
 
-// Zero-copy: borrows nodes & siblings directly from the byte buffer
-let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(bytes).unwrap();
+// Zero-copy: references nodes and CSR child data (`child_offsets` + `children_list`) directly in the byte buffer
+let da_ref = DoubleArrayRef::<u8>::from_bytes(bytes).unwrap();
 assert_eq!(da_ref.exact_match(b"abc"), Some(0));
 
 // Convert to owned if needed
 let da_owned = da_ref.to_owned();
 ```
+
+To keep the buffer and view bundled in one owning value (e.g. with
+`memmap2::Mmap`), use `DoubleArrayBacked::from_backing` — see the
+`DoubleArrayBacked` and `StableBacking` rustdoc for the pattern.
 
 ### Char keys (dictionary)
 

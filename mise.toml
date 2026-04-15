@@ -7,8 +7,12 @@ description = "Run all tests"
 run = "cargo test"
 
 [tasks.check]
-description = "Run cargo check and clippy"
-run = ["cargo check", "cargo clippy -- -D warnings"]
+description = "Run cargo check, clippy, and rustdoc lints"
+run = [
+  "cargo check",
+  "cargo clippy -- -D warnings",
+  "RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --lib",
+]
 
 [tasks.fmt]
 description = "Format code"
@@ -21,6 +25,22 @@ run = "cargo fmt --check"
 [tasks.miri]
 description = "Run tests under Miri (requires nightly)"
 run = "cargo +nightly miri test"
+
+[tasks."ci:fast"]
+description = "Fast CI (no miri) — fmt, check, build, test"
+run = [
+  "mise run fmt:check",
+  "mise run check",
+  "mise run build",
+  "mise run test",
+]
+
+[tasks.ci]
+description = "Full CI — ci:fast + miri (requires nightly for miri)"
+run = [
+  "mise run ci:fast",
+  "mise run miri",
+]
 
 [tasks.release]
 description = "Tag, push, and publish to crates.io"

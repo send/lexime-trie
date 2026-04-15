@@ -144,7 +144,7 @@ impl<L: Label> DoubleArray<L> {
         // constructed `DoubleArray`, but we check in release anyway: if a
         // future refactor ever broke the invariant, the `as u32` truncation
         // below would produce a buffer whose header claims fewer elements
-        // than the payload contains. `from_bytes_ref` would then build a
+        // than the payload contains. `from_bytes` would then build a
         // slice over truncated bounds, and the extra bytes would be
         // silently treated as a different section. Asserting here keeps
         // that class of corruption from ever escaping into a serialized
@@ -235,11 +235,27 @@ impl<L: Label> DoubleArray<L> {
 /// - `child_offsets[N] == children_list.len()`
 ///
 /// Monotonicity is intentionally NOT checked here: it would be O(N) and
-/// defeat zero-copy deserialization for the `from_bytes_ref` path. A
+/// defeat zero-copy deserialization for the `from_bytes` path. A
 /// non-monotonic or otherwise malformed offset cannot cause UB (Rust slice
-/// indexing is always bounds-checked — corruption surfaces as a panic on
-/// query, never as memory unsafety). Callers that need hard guarantees can
-/// run [`validate_strict`] explicitly.
+/// indexing is always bounds-checked) and does not panic either. Each
+/// query path defends against corruption through the strategy suited to
+/// its hot-path shape:
+///
+/// - `traverse` / `exact_match` / the `common_prefix_search` iterator
+///   follow `base XOR code` jumps and check `next_idx as usize < nodes.len()`
+///   explicitly before every `nodes.get_unchecked` access.
+/// - `probe` bounds-checks the terminal index it loads and calls
+///   `child_range_width`, which uses `saturating_sub` so non-monotonic
+///   offsets yield zero rather than wrap.
+/// - `predictive_search`'s DFS uses `.get()` on the `children_list`
+///   slice and `.get()` + let-else on each child node lookup, so
+///   out-of-range entries are skipped silently.
+///
+/// `predictive_search` is the sole exception to termination: its DFS has
+/// no visited set, so a corruption pattern that happens to introduce a
+/// cycle in the CSR children graph can loop indefinitely. Callers with
+/// untrusted buffers should run [`validate_strict`] explicitly or bound
+/// iteration with `.take(N)`.
 pub(crate) fn validate_cheap(
     nodes: &[Node],
     child_offsets: &[u32],
@@ -259,10 +275,14 @@ pub(crate) fn validate_cheap(
 
 /// Full O(N) validation: cheap checks + monotonicity of `child_offsets`.
 ///
-/// Not invoked by `from_bytes` / `from_bytes_ref`. Currently used only by
-/// tests; a public wrapper on `DoubleArray` / `DoubleArrayRef` can be added
-/// later if callers need to reject malformed input before any query.
-#[cfg(test)]
+/// Not invoked by either `from_bytes` constructor. Exposed to callers via
+/// `TrieSearch::validate_strict` so they can opt into eager rejection of
+/// malformed buffers — useful when loading trie bytes from an untrusted
+/// source and the caller would rather error out than quietly yield wrong
+/// or partial results. Query paths are panic-safe on non-monotonic
+/// offsets, but `predictive_search` has no visited set and can fail to
+/// terminate on corruption that forms a cycle; callers handling
+/// untrusted input should validate first (or bound iteration).
 pub(crate) fn validate_strict(
     nodes: &[Node],
     child_offsets: &[u32],
@@ -309,7 +329,7 @@ fn deserialize_u32_slice(bytes: &[u8]) -> Option<Vec<u32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DoubleArray;
+    use crate::{DoubleArray, TrieSearch};
 
     #[test]
     fn round_trip_empty() {
@@ -484,7 +504,7 @@ mod tests {
 
     #[test]
     fn validate_strict_rejects_non_monotonic_child_offsets() {
-        // The load path (from_bytes / from_bytes_ref) deliberately skips the
+        // The load path (owned + zero-copy `from_bytes`) deliberately skips the
         // O(N) monotonicity check to keep zero-copy deserialization O(1).
         // `validate_strict` is the opt-in O(N) path callers can run when
         // they need to reject malformed input before any query.

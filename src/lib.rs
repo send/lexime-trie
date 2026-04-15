@@ -9,7 +9,7 @@
 //! # Quick start
 //!
 //! ```
-//! use lexime_trie::DoubleArray;
+//! use lexime_trie::{DoubleArray, TrieSearch};
 //!
 //! let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
 //! let da = DoubleArray::<u8>::build(&keys);
@@ -22,7 +22,7 @@
 //! `mmap` or page-aligned allocations satisfy this requirement.
 //!
 //! ```
-//! use lexime_trie::{DoubleArray, DoubleArrayRef};
+//! use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};
 //!
 //! let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
 //! let da = DoubleArray::<u8>::build(&keys);
@@ -36,7 +36,7 @@
 //! };
 //! bytes.copy_from_slice(&raw);
 //!
-//! let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(bytes).unwrap();
+//! let da_ref = DoubleArrayRef::<u8>::from_bytes(bytes).unwrap();
 //! assert_eq!(da_ref.exact_match(b"abc"), Some(2));
 //! ```
 
@@ -45,6 +45,7 @@
 #[cfg(not(target_endian = "little"))]
 compile_error!("lexime-trie requires a little-endian platform");
 
+mod backed;
 mod build;
 mod code_map;
 mod da_ref;
@@ -54,13 +55,18 @@ mod search;
 mod serial;
 mod view;
 
+#[cfg(test)]
+mod test_support;
+
 use std::marker::PhantomData;
 
-pub use code_map::CodeMapper;
+pub use backed::{CloneStableBacking, DoubleArrayBacked, StableBacking};
 pub use da_ref::DoubleArrayRef;
 pub use label::Label;
-pub use node::Node;
-pub use search::{PrefixMatch, ProbeResult, SearchMatch};
+pub use search::{PrefixMatch, ProbeResult, SearchMatch, TrieSearch};
+
+use code_map::CodeMapper;
+use node::Node;
 
 /// Errors that can occur during trie operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,10 +129,5 @@ impl<L: Label> DoubleArray<L> {
             code_map,
             _phantom: PhantomData,
         }
-    }
-
-    /// Returns the number of nodes in the trie.
-    pub fn num_nodes(&self) -> usize {
-        self.nodes.len()
     }
 }

@@ -30,7 +30,7 @@ const FREQ_DENSE_THRESHOLD: u32 = 65_536;
 /// Code 0 is reserved for the terminal symbol.
 /// Higher-frequency labels receive smaller codes to improve cache locality.
 #[derive(Clone, Debug)]
-pub struct CodeMapper {
+pub(crate) struct CodeMapper {
     /// label (as u32) → remapped code. 0 means unmapped.
     table: Vec<u32>,
     /// code → label (as u32). Index 0 is unused (terminal symbol).
@@ -45,7 +45,7 @@ impl CodeMapper {
     /// Counts the frequency of each label across all keys and assigns
     /// dense codes in descending frequency order. Code 0 is reserved
     /// for the terminal symbol.
-    pub fn build<L: Label>(keys: &[impl AsRef<[L]>]) -> Self {
+    pub(crate) fn build<L: Label>(keys: &[impl AsRef<[L]>]) -> Self {
         // Find max label value in a single pass to size the frequency array.
         let mut max_label: u32 = 0;
         for key in keys {
@@ -120,7 +120,7 @@ impl CodeMapper {
 
     /// Returns the code for a label. Returns 0 if the label is unmapped.
     #[inline]
-    pub fn get<L: Label>(&self, label: L) -> u32 {
+    pub(crate) fn get<L: Label>(&self, label: L) -> u32 {
         let v: u32 = label.into();
         let idx = v as usize;
         if idx < self.table.len() {
@@ -131,21 +131,26 @@ impl CodeMapper {
         }
     }
 
-    /// Returns the label (as u32) for a code, or `None` if the code is out
-    /// of range for this mapper. Code 0 is the terminal symbol.
+    /// Returns the label for a code, or `None` if the code is out of range
+    /// or the stored u32 fails to round-trip back to `L`. Code 0 is the
+    /// terminal symbol and is never a valid label, so it always yields
+    /// `None` — corrupted data that emits code 0 in a child position is
+    /// skipped rather than decoded as `\0`.
     ///
-    /// Out-of-range codes are returned as `None` rather than a panic so that
-    /// corrupted / malformed serialized data surfaces as a graceful signal
-    /// at the call site instead of an OOB index panic in release builds.
+    /// Out-of-range codes return `None` rather than panicking so corrupted
+    /// or malformed serialized data surfaces as a graceful signal at the
+    /// call site instead of an OOB index panic in release builds. A failed
+    /// `TryFrom<u32>` likewise yields `None`; for `u8` keys this cannot
+    /// occur, for `char` it fires only on deliberately corrupted data, and
+    /// for external `Label` impls it can also fire when the round-trip
+    /// contract documented on the `Label` trait is violated.
     #[inline]
-    pub fn reverse(&self, code: u32) -> Option<u32> {
-        self.reverse_table.get(code as usize).copied()
-    }
-
-    /// The number of distinct codes including the terminal symbol.
-    #[inline]
-    pub fn alphabet_size(&self) -> u32 {
-        self.alphabet_size
+    pub(crate) fn reverse<L: Label>(&self, code: u32) -> Option<L> {
+        if code == 0 {
+            return None;
+        }
+        let raw = self.reverse_table.get(code as usize).copied()?;
+        L::try_from(raw).ok()
     }
 
     /// Returns the serialised size in bytes (without allocating).
@@ -202,15 +207,8 @@ impl CodeMapper {
         }
     }
 
-    /// Serializes the CodeMapper to bytes.
-    pub fn as_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(self.serialized_size());
-        self.write_to(&mut buf);
-        buf
-    }
-
     /// Deserializes a CodeMapper from bytes. Returns the CodeMapper and the number of bytes consumed.
-    pub fn from_bytes(bytes: &[u8]) -> Option<(Self, usize)> {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Option<(Self, usize)> {
         if bytes.len() < 12 {
             return None;
         }
@@ -264,7 +262,7 @@ mod tests {
     fn empty_keys() {
         let keys: Vec<Vec<u8>> = vec![];
         let cm = CodeMapper::build(&keys);
-        assert_eq!(cm.alphabet_size(), 1); // only terminal
+        assert_eq!(cm.alphabet_size, 1); // only terminal
     }
 
     #[test]
@@ -305,8 +303,8 @@ mod tests {
         for label in [b'a', b'b', b'c', b'd', b'e'] {
             let code = cm.get(label);
             assert_ne!(code, 0);
-            let back = cm.reverse(code).expect("mapped code must reverse");
-            assert_eq!(back, label as u32);
+            let back: u8 = cm.reverse(code).expect("mapped code must reverse");
+            assert_eq!(back, label);
         }
     }
 
@@ -315,8 +313,19 @@ mod tests {
         let keys: Vec<Vec<u8>> = vec![vec![b'a', b'b']];
         let cm = CodeMapper::build(&keys);
         // alphabet_size = 3 (terminal + 'a' + 'b'), so code 3+ is out of range
-        assert_eq!(cm.reverse(3), None);
-        assert_eq!(cm.reverse(u32::MAX), None);
+        assert_eq!(cm.reverse::<u8>(3), None);
+        assert_eq!(cm.reverse::<u8>(u32::MAX), None);
+    }
+
+    #[test]
+    fn reverse_terminal_code_is_none() {
+        // Code 0 is the terminal symbol and must never decode back to a
+        // label, even though `reverse_table[0]` is in-bounds and would
+        // round-trip through `u8::try_from(0) == Ok(0)`.
+        let keys: Vec<Vec<u8>> = vec![vec![b'a', b'b']];
+        let cm = CodeMapper::build(&keys);
+        assert_eq!(cm.reverse::<u8>(0), None);
+        assert_eq!(cm.reverse::<char>(0), None);
     }
 
     #[test]
@@ -331,22 +340,23 @@ mod tests {
         assert_ne!(code_u, 0);
 
         // Round trip
-        assert_eq!(cm.reverse(code_a), Some('あ' as u32));
-        assert_eq!(cm.reverse(code_u), Some('う' as u32));
+        assert_eq!(cm.reverse::<char>(code_a), Some('あ'));
+        assert_eq!(cm.reverse::<char>(code_u), Some('う'));
     }
 
     #[test]
-    fn as_bytes_from_bytes_round_trip() {
+    fn write_to_from_bytes_round_trip() {
         let keys: Vec<Vec<u8>> = vec![
             vec![b'h', b'e', b'l', b'l', b'o'],
             vec![b'w', b'o', b'r', b'l', b'd'],
         ];
         let cm = CodeMapper::build(&keys);
-        let bytes = cm.as_bytes();
+        let mut bytes = Vec::new();
+        cm.write_to(&mut bytes);
         let (cm2, consumed) = CodeMapper::from_bytes(&bytes).unwrap();
 
         assert_eq!(consumed, bytes.len());
-        assert_eq!(cm.alphabet_size(), cm2.alphabet_size());
+        assert_eq!(cm.alphabet_size, cm2.alphabet_size);
 
         for label in [b'h', b'e', b'l', b'o', b'w', b'r', b'd'] {
             assert_eq!(cm.get(label), cm2.get(label));
@@ -366,14 +376,14 @@ mod tests {
         let keys: Vec<Vec<char>> = vec![vec!['あ', '\u{1F600}'], vec!['\u{1F600}', '\u{1F680}']];
         let cm = CodeMapper::build(&keys);
         // 3 distinct labels + terminal.
-        assert_eq!(cm.alphabet_size(), 4);
+        assert_eq!(cm.alphabet_size, 4);
         // '\u{1F600}' appears twice → smaller code than the others.
         let code_smile = cm.get('\u{1F600}');
         let code_rocket = cm.get('\u{1F680}');
         assert_ne!(code_smile, 0);
         assert!(code_smile < code_rocket);
         // Round trip still works.
-        assert_eq!(cm.reverse(code_smile), Some('\u{1F600}' as u32));
-        assert_eq!(cm.reverse(code_rocket), Some('\u{1F680}' as u32));
+        assert_eq!(cm.reverse::<char>(code_smile), Some('\u{1F600}'));
+        assert_eq!(cm.reverse::<char>(code_rocket), Some('\u{1F680}'));
     }
 }

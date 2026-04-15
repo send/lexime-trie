@@ -5,6 +5,7 @@ use crate::serial::{validate_cheap, HeaderV3};
 use crate::view::TrieView;
 use crate::{
     CodeMapper, DoubleArray, Label, Node, PrefixMatch, ProbeResult, SearchMatch, TrieError,
+    TrieSearch,
 };
 
 /// A zero-copy reference to a serialized double-array trie (v3 format).
@@ -15,13 +16,41 @@ use crate::{
 ///
 /// `code_map` is always heap-allocated since it is small and requires
 /// deserialization.
+///
+/// # Internal representation
+///
+/// Internally this stores **raw pointers + lengths** rather than real
+/// `&'a [T]` slices because [`DoubleArrayBacked`](crate::DoubleArrayBacked)
+/// holds a `DoubleArrayRef<'static, L>` co-located with the byte buffer it
+/// borrows from: if the inner type contained real shared references
+/// Stacked Borrows would treat them as strongly-protected during
+/// `drop`, conflicting with reclamation of the backing storage.
+#[derive(Clone)]
 pub struct DoubleArrayRef<'a, L: Label> {
-    nodes: &'a [Node],
-    child_offsets: &'a [u32],
-    children_list: &'a [u32],
-    code_map: CodeMapper,
-    _phantom: PhantomData<L>,
+    nodes_ptr: *const Node,
+    nodes_len: usize,
+    child_offsets_ptr: *const u32,
+    child_offsets_len: usize,
+    children_list_ptr: *const u32,
+    children_list_len: usize,
+    pub(crate) code_map: CodeMapper,
+    _marker: PhantomData<(&'a [u8], L)>,
 }
+
+// SAFETY: The raw pointer fields point into a `[u8]` borrow that is
+// tracked by the `PhantomData<&'a [u8]>` marker. Shared `&[u8]` is
+// `Send + Sync`; reconstructing `&[Node]` / `&[u32]` over the same
+// memory inside `view()` is equivalent to holding those shared slices,
+// which are likewise `Send + Sync`. `CodeMapper` (owned `Vec<u32>` +
+// `u32`) is `Send + Sync`. Raw pointers lose these auto-traits by
+// default, so we re-assert them — but `L` also appears in the struct
+// via `PhantomData<(&'a [u8], L)>`, so we must propagate `L`'s own
+// auto-traits to avoid bypassing a downstream `!Send`/`!Sync` `Label`
+// type's contract (e.g. a `Label` containing `PhantomData<Rc<()>>`).
+// The crate's pre-blessed `Label` impls (`u8`, `char`) are
+// `Send + Sync`, so this is a no-op for typical use.
+unsafe impl<'a, L: Label + Send> Send for DoubleArrayRef<'a, L> {}
+unsafe impl<'a, L: Label + Sync> Sync for DoubleArrayRef<'a, L> {}
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// Creates a zero-copy `DoubleArrayRef` from a byte slice (v3 format only).
@@ -37,7 +66,7 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// Returns [`TrieError::MisalignedData`] if the buffer is not properly aligned.
     /// Returns [`TrieError::TruncatedData`] if the buffer is too short or the
     /// CSR structural invariants are violated.
-    pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, TrieError> {
         let header = HeaderV3::parse(bytes)?;
 
         let nodes_ptr = bytes[header.nodes_offset()..].as_ptr();
@@ -60,19 +89,26 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
 
         let child_offsets_count = header.nodes_count + 1;
 
+        // Validate through transient slices; store as (ptr, len) to avoid
+        // long-lived `&[T]` references inside `Self` (see struct-level doc).
+        //
         // SAFETY:
         // - `Node` is `#[repr(C)]` with two `u32` fields, size 8, align 4, no padding.
         // - `u32` is size 4 align 4 with no invalid bit patterns.
-        // - We verified alignment and bounds above.
-        // - The lifetime `'a` ties the slices to the input buffer.
+        // - Pointer alignment (4 bytes for both `Node` and `u32`) was
+        //   verified by the three `is_multiple_of` checks immediately above.
+        // - Section bounds — that each `{nodes, child_offsets, children_list}`
+        //   slice fits inside the input buffer — were verified by
+        //   `HeaderV3::parse` when it computed the section offsets.
+        // - The lifetime `'a` of the transient slices is tied to the input buffer.
         // - We only support little-endian platforms where the in-memory layout
         //   matches the serialized LE format.
-        let nodes =
+        let nodes: &'a [Node] =
             unsafe { std::slice::from_raw_parts(nodes_ptr as *const Node, header.nodes_count) };
-        let child_offsets = unsafe {
+        let child_offsets: &'a [u32] = unsafe {
             std::slice::from_raw_parts(child_offsets_ptr as *const u32, child_offsets_count)
         };
-        let children_list = unsafe {
+        let children_list: &'a [u32] = unsafe {
             std::slice::from_raw_parts(children_list_ptr as *const u32, header.children_count)
         };
 
@@ -85,68 +121,109 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
         .ok_or(TrieError::TruncatedData)?;
 
         Ok(Self {
-            nodes,
-            child_offsets,
-            children_list,
+            nodes_ptr: nodes.as_ptr(),
+            nodes_len: nodes.len(),
+            child_offsets_ptr: child_offsets.as_ptr(),
+            child_offsets_len: child_offsets.len(),
+            children_list_ptr: children_list.as_ptr(),
+            children_list_len: children_list.len(),
             code_map,
-            _phantom: PhantomData,
+            _marker: PhantomData,
         })
     }
 
-    /// Returns a `TrieView` borrowing this ref's data.
+    /// Materialise a `TrieView` whose slice lifetimes are tied to `&self`.
     #[inline]
-    fn view(&self) -> TrieView<'_, L> {
-        TrieView {
-            nodes: self.nodes,
-            child_offsets: self.child_offsets,
-            children_list: self.children_list,
-            code_map: &self.code_map,
-            _phantom: PhantomData,
+    pub(crate) fn view(&self) -> TrieView<'_, L> {
+        // SAFETY: the three raw pointers were produced during construction
+        // from validated slices in `from_bytes`. Two cases to consider for
+        // how long those pointers remain valid, both of which bound
+        // validity to at least the returned `'_` lifetime:
+        //
+        // - Normal borrow case (`DoubleArrayRef::from_bytes(bytes: &'a [u8])`):
+        //   the slices borrow into `bytes`, and the `PhantomData<&'a [u8]>`
+        //   marker prevents this `DoubleArrayRef` from outliving that borrow.
+        // - Self-referential case (`DoubleArrayBacked`, which stores a
+        //   `DoubleArrayRef<'static, L>` beside the owned backing):
+        //   the `'static` marker is synthesised and provides no real
+        //   protection, but soundness follows from ownership — the
+        //   backing is owned by the outer struct and outlives every
+        //   `&self` borrow of the wrapper (and therefore this view).
+        //
+        // In both cases the reconstructed slices are valid for `'_`.
+        // Alignment, bounds, and layout were all checked in `from_bytes`.
+        unsafe {
+            TrieView {
+                nodes: std::slice::from_raw_parts(self.nodes_ptr, self.nodes_len),
+                child_offsets: std::slice::from_raw_parts(
+                    self.child_offsets_ptr,
+                    self.child_offsets_len,
+                ),
+                children_list: std::slice::from_raw_parts(
+                    self.children_list_ptr,
+                    self.children_list_len,
+                ),
+                code_map: &self.code_map,
+                _phantom: PhantomData,
+            }
         }
     }
 
-    /// Returns the number of nodes in the trie.
-    pub fn num_nodes(&self) -> usize {
-        self.nodes.len()
+    /// Converts this zero-copy reference to an owned [`DoubleArray`].
+    pub fn to_owned(&self) -> DoubleArray<L> {
+        let view = self.view();
+        DoubleArray::new(
+            view.nodes.to_vec(),
+            view.child_offsets.to_vec(),
+            view.children_list.to_vec(),
+            self.code_map.clone(),
+        )
+    }
+}
+
+impl<'a, L: Label> std::fmt::Debug for DoubleArrayRef<'a, L> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Avoid dumping the whole nodes array; show shape instead.
+        f.debug_struct("DoubleArrayRef")
+            .field("node_slots", &self.nodes_len)
+            .field("children", &self.children_list_len)
+            .finish()
+    }
+}
+
+impl<'a, L: Label> TrieSearch<L> for DoubleArrayRef<'a, L> {
+    #[inline]
+    fn node_slot_count(&self) -> usize {
+        self.nodes_len
     }
 
-    /// Exact match search. Returns the value_id if the key exists.
     #[inline]
-    pub fn exact_match(&self, key: &[L]) -> Option<u32> {
+    fn exact_match(&self, key: &[L]) -> Option<u32> {
         self.view().exact_match(key)
     }
 
-    /// Common prefix search. Returns an iterator over all prefixes of `query`
-    /// that exist as keys in the trie.
-    pub fn common_prefix_search<'b>(
+    fn common_prefix_search<'b>(
         &'b self,
         query: &'b [L],
     ) -> impl Iterator<Item = PrefixMatch> + 'b {
         self.view().common_prefix_search(query)
     }
 
-    /// Predictive search. Returns an iterator over all keys that start with `prefix`.
-    pub fn predictive_search<'b>(
+    fn predictive_search<'b>(
         &'b self,
         prefix: &'b [L],
     ) -> impl Iterator<Item = SearchMatch<L>> + 'b {
         self.view().predictive_search(prefix)
     }
 
-    /// Probe a key. Returns whether the key exists and whether it has children.
     #[inline]
-    pub fn probe(&self, key: &[L]) -> ProbeResult {
+    fn probe(&self, key: &[L]) -> ProbeResult {
         self.view().probe(key)
     }
 
-    /// Converts this zero-copy reference to an owned [`DoubleArray`].
-    pub fn to_owned(&self) -> DoubleArray<L> {
-        DoubleArray::new(
-            self.nodes.to_vec(),
-            self.child_offsets.to_vec(),
-            self.children_list.to_vec(),
-            self.code_map.clone(),
-        )
+    fn validate_strict(&self) -> Result<(), TrieError> {
+        let view = self.view();
+        crate::serial::validate_strict(view.nodes, view.child_offsets, view.children_list)
     }
 }
 
@@ -154,51 +231,18 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
 mod tests {
     use super::*;
 
+    use crate::test_support::AlignedBytes;
+
     fn build_u8(keys: &[&[u8]]) -> DoubleArray<u8> {
         DoubleArray::build(keys)
-    }
-
-    /// 8-byte aligned buffer for `from_bytes_ref` tests.
-    ///
-    /// `Vec<u8>::as_bytes()` only guarantees 1-byte alignment. Standard allocators
-    /// happen to return 8-16 byte aligned memory, but Miri's allocator does not.
-    /// This wrapper uses `Vec<u64>` as backing storage to guarantee 8-byte alignment.
-    struct AlignedBuffer {
-        _backing: Vec<u64>,
-        len: usize,
-    }
-
-    impl AlignedBuffer {
-        fn new(bytes: &[u8]) -> Self {
-            let n = bytes.len().div_ceil(8);
-            let mut backing = vec![0u64; n];
-            // SAFETY: copying bytes into a u64 buffer; u64 has no invalid bit patterns.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    backing.as_mut_ptr() as *mut u8,
-                    bytes.len(),
-                );
-            }
-            Self {
-                _backing: backing,
-                len: bytes.len(),
-            }
-        }
-
-        fn as_slice(&self) -> &[u8] {
-            // SAFETY: _backing is at least `self.len` bytes; u64 alignment (8)
-            // satisfies the Node/u32 alignment requirement (4).
-            unsafe { std::slice::from_raw_parts(self._backing.as_ptr() as *const u8, self.len) }
-        }
     }
 
     #[test]
     fn exact_match_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let buf = AlignedBytes::new(&da.as_bytes());
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
 
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(da_ref.exact_match(key), Some(i as u32));
@@ -210,8 +254,8 @@ mod tests {
     fn common_prefix_search_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let buf = AlignedBytes::new(&da.as_bytes());
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
 
         let results: Vec<PrefixMatch> = da_ref.common_prefix_search(b"abcd").collect();
         assert_eq!(results.len(), 3);
@@ -224,8 +268,8 @@ mod tests {
     fn predictive_search_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let buf = AlignedBytes::new(&da.as_bytes());
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
 
         let results: Vec<SearchMatch<u8>> = da_ref.predictive_search(b"a").collect();
         let mut value_ids: Vec<u32> = results.iter().map(|r| r.value_id).collect();
@@ -237,8 +281,8 @@ mod tests {
     fn probe_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let buf = AlignedBytes::new(&da.as_bytes());
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
 
         let r = da_ref.probe(b"a");
         assert_eq!(r.value, Some(0));
@@ -262,8 +306,8 @@ mod tests {
             "か".chars().collect(),
         ];
         let da = DoubleArray::<char>::build(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<char>::from_bytes_ref(buf.as_slice()).unwrap();
+        let buf = AlignedBytes::new(&da.as_bytes());
+        let da_ref = DoubleArrayRef::<char>::from_bytes(buf.as_slice()).unwrap();
 
         for (i, key) in keys.iter().enumerate() {
             assert_eq!(da_ref.exact_match(key), Some(i as u32));
@@ -274,8 +318,8 @@ mod tests {
     fn to_owned_works() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
+        let buf = AlignedBytes::new(&da.as_bytes());
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
         let da_owned = da_ref.to_owned();
 
         for (i, key) in keys.iter().enumerate() {
@@ -309,7 +353,7 @@ mod tests {
         let misaligned_slice = &buf[offset..offset + bytes.len()];
 
         assert!(matches!(
-            DoubleArrayRef::<u8>::from_bytes_ref(misaligned_slice),
+            DoubleArrayRef::<u8>::from_bytes(misaligned_slice),
             Err(TrieError::MisalignedData)
         ));
     }
@@ -321,7 +365,7 @@ mod tests {
         let mut bytes = da.as_bytes();
         bytes[4] = 99; // bogus version
         assert!(matches!(
-            DoubleArrayRef::<u8>::from_bytes_ref(&bytes),
+            DoubleArrayRef::<u8>::from_bytes(&bytes),
             Err(TrieError::InvalidVersion)
         ));
     }
@@ -334,23 +378,38 @@ mod tests {
 
         // Truncate to less than header
         assert!(matches!(
-            DoubleArrayRef::<u8>::from_bytes_ref(&bytes[..10]),
+            DoubleArrayRef::<u8>::from_bytes(&bytes[..10]),
             Err(TrieError::TruncatedData)
         ));
 
         // Truncate data section
         assert!(matches!(
-            DoubleArrayRef::<u8>::from_bytes_ref(&bytes[..24]),
+            DoubleArrayRef::<u8>::from_bytes(&bytes[..24]),
             Err(TrieError::TruncatedData)
         ));
     }
 
     #[test]
-    fn num_nodes_via_ref() {
+    fn node_slot_count_via_ref() {
         let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
         let da = build_u8(&keys);
-        let buf = AlignedBuffer::new(&da.as_bytes());
-        let da_ref = DoubleArrayRef::<u8>::from_bytes_ref(buf.as_slice()).unwrap();
-        assert_eq!(da_ref.num_nodes(), da.num_nodes());
+        let buf = AlignedBytes::new(&da.as_bytes());
+        let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
+        assert_eq!(da_ref.node_slot_count(), da.node_slot_count());
+    }
+
+    #[test]
+    fn clone_aliases_same_buffer() {
+        // The derived `Clone` shallow-copies the raw pointers; both
+        // copies alias into the original byte buffer. Dropping one
+        // copy must not invalidate the other.
+        let keys: Vec<&[u8]> = vec![b"a", b"ab"];
+        let da = build_u8(&keys);
+        let buf = AlignedBytes::new(&da.as_bytes());
+        let r1 = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
+        let r2 = r1.clone();
+        drop(r1);
+        assert_eq!(r2.exact_match(b"a"), Some(0));
+        assert_eq!(r2.exact_match(b"ab"), Some(1));
     }
 }

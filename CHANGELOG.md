@@ -2,6 +2,170 @@
 
 All notable changes to this crate are documented in this file.
 
+## 0.4.0 — 2026-04-15
+
+Breaking release that tightens the public surface and adds an owning
+wrapper for the zero-copy view.
+
+### Breaking
+
+- **`TrieSearch` trait.** The five query methods previously defined
+  inherently on `DoubleArray` and `DoubleArrayRef` —
+  `exact_match`, `common_prefix_search`, `predictive_search`,
+  `probe`, `node_slot_count` — are now on the `TrieSearch<L>`
+  trait. Bring it into scope at call sites:
+  ```rust
+  use lexime_trie::{DoubleArray, TrieSearch};
+  ```
+  Generic code can now abstract over "owned" (`DoubleArray<L>`),
+  "borrowed" (`DoubleArrayRef<'_, L>`), and "owned-mmap"
+  (`DoubleArrayBacked<L, B>`) representations.
+- **`num_nodes()` → `node_slot_count()`.** The old name suggested
+  "number of live trie nodes", but the value returned is
+  `self.nodes.len()` — the slot count including sentinel and any
+  remaining free slots. The renamed method has docs explaining
+  exactly what it counts.
+- **`CodeMapper::reverse` returns `Option<L>`.** Previously it
+  returned `Option<u32>` and callers had to follow up with
+  `L::try_from`. The generic parameter is now on the method itself
+  and the conversion is folded in. (`CodeMapper` is internal in
+  0.4 — see below — but this also simplifies the trait
+  implementations inside the crate.)
+- **`CodeMapper` and `Node` are no longer public.** They were
+  re-exported from the crate root but carried internal layout
+  details. The 0.4 surface is limited to `DoubleArray`,
+  `DoubleArrayRef`, `DoubleArrayBacked`, `TrieSearch`, `Label`,
+  `PrefixMatch`, `SearchMatch`, `ProbeResult`, and `TrieError`.
+- **`Label::ALPHABET_SIZE` removed.** The constant was unused in
+  the crate and in lexime (its only known consumer). External
+  implementors of `Label` no longer need to define it.
+- **`CodeMapper::alphabet_size()` and `CodeMapper::as_bytes()`
+  removed.** Dead outside tests; `CodeMapper` itself is now
+  internal, so this is only observable through its deletion from
+  the re-export list.
+- **`Node::raw_base`, `Node::raw_check`, `Node::from_raw`
+  removed.** These existed for external serialisation callers
+  that never materialised.
+- **`DoubleArrayRef::from_bytes_ref` → `DoubleArrayRef::from_bytes`.**
+  The `_ref` suffix was redundant with the type's own name;
+  renaming puts `DoubleArray::from_bytes` and
+  `DoubleArrayRef::from_bytes` side-by-side.
+- **`TrieSearch` is not dyn-compatible.** The trait uses
+  return-position `impl Trait` for iterators, so `&dyn
+  TrieSearch<L>` does not compile. Use the trait as a generic
+  bound (`fn foo<T: TrieSearch<u8>>`) instead.
+
+### Added
+
+- **`DoubleArrayBacked<L, B: StableBacking>`.** A `DoubleArrayRef`
+  bundled with the byte buffer it borrows from. Removes the
+  self-referential-struct friction that forced consumers like
+  lexime to use `mem::transmute<DoubleArrayRef<'_, u8>,
+  DoubleArrayRef<'static, u8>>` to keep an mmap and its view in
+  the same owning struct. Constructor is `from_backing`.
+  Implements `TrieSearch<L>`. Infallibly `Clone` when
+  `B: CloneStableBacking` (bitwise-copies the view, refcount-bumps
+  the backing); callers with a `Vec<u8>` / `Box<[u8]>` backing use
+  the fallible `try_clone()` method instead. Provides
+  `into_backing()` to recover the original buffer.
+- **`StableBacking` marker trait.** `unsafe trait` that promises
+  the implementing type's `AsRef<[u8]>::as_ref` pointer stays
+  valid across moves of `Self` and the bytes do not change
+  afterwards. `DoubleArrayBacked<L, B>` now bounds `B` by
+  `StableBacking` so the invariant that made the previous
+  `AsRef<[u8]>` contract sound-on-paper is enforced at the
+  type level. Pre-blessed implementations: `Vec<u8>`,
+  `Box<[u8]>`, `Arc<[u8]>`, `Rc<[u8]>`, `&[u8]`. To use
+  `memmap2::Mmap` or another external type, wrap it in a local
+  newtype with `AsRef<[u8]>` + `unsafe impl StableBacking` (the
+  trait docs show the 4-line pattern). Inline-storage types
+  such as `[u8; N]`, `SmallVec` inline mode, and
+  `heapless::Vec` explicitly violate the contract and must not
+  implement the trait.
+- **`TrieSearch::validate_strict()`.** O(N) structural
+  validation: all cheap checks plus monotonicity of
+  `child_offsets`. Run this after loading from an untrusted
+  source to reject malformed buffers before any query. Not
+  invoked by either `from_bytes` constructor.
+- **`DoubleArrayRef<'a, L>` now derives `Clone`** and implements
+  a compact `Debug`. `DoubleArrayBacked<L, B>` also implements
+  both, with `Clone` gated by `CloneStableBacking` (see below).
+- **`CloneStableBacking` sub-trait.** `unsafe trait` extending
+  `StableBacking + Clone` with the additional guarantee that
+  `<B as Clone>::clone(&self).as_ref().as_ptr()` equals
+  `self.as_ref().as_ptr()` — i.e. cloning the backing does not
+  reallocate, it shares or refcounts the existing storage.
+  `DoubleArrayBacked<L, B>` implements `Clone` infallibly and
+  without re-parsing when `B: CloneStableBacking`. Pre-blessed
+  impls: `Arc<[u8]>`, `Rc<[u8]>`, `&[u8]`. For backings whose
+  `Clone` allocates a fresh buffer (`Vec<u8>`, `Box<[u8]>`), use
+  `DoubleArrayBacked::try_clone()` — which re-parses the new
+  allocation and returns `Err(TrieError::MisalignedData)` if the
+  fresh buffer fails to meet the 4-byte alignment requirement.
+- **`DoubleArrayBacked::try_clone(&self) -> Result<Self, TrieError>`.**
+  Fallible clone available for any `B: StableBacking + Clone`.
+  Re-parses from `self.backing.clone()` and is the only clone
+  path offered for `Vec<u8>` / `Box<[u8]>` backings; the realistic
+  failure mode is a `MisalignedData` when the cloned allocation
+  has different alignment than the original (primarily under Miri
+  or a custom `GlobalAlloc`).
+- **`DoubleArrayBacked::as_view() -> &DoubleArrayRef<'_, L>`.**
+  Borrow the inner zero-copy view without consuming the wrapper.
+  The returned reference's lifetime is tied to `&self`, so the
+  internally-synthesised `'static` lifetime is never observable.
+
+### Internal
+
+- **`DoubleArrayRef` now stores raw pointers instead of `&'a [T]`
+  slices.** Public API and type layout size are unchanged. The
+  change lets `DoubleArrayBacked` embed a plain
+  `DoubleArrayRef<'static, L>` field without tripping Stacked Borrows'
+  strong-protection rule on drop.
+
+### Migration (0.3.x → 0.4.0)
+
+1. Add `use lexime_trie::TrieSearch;` at every call site of
+   `exact_match`, `common_prefix_search`, `predictive_search`,
+   `probe`, `node_slot_count`, or `validate_strict`. The
+   compiler's error message suggests the exact import.
+2. Rename any `.num_nodes()` to `.node_slot_count()`.
+3. Rename `DoubleArrayRef::from_bytes_ref` to
+   `DoubleArrayRef::from_bytes`.
+4. If you were matching on `lexime_trie::Node` or
+   `lexime_trie::CodeMapper`, you can no longer do so; these
+   types are internal in 0.4. No replacement is needed for
+   typical use — all trie operations are on the owner types.
+5. If you were keeping an `mmap` (or `Arc<[u8]>`, `Vec<u8>`,
+   etc.) and a `DoubleArrayRef<'static, L>` in the same struct
+   via `mem::transmute`, replace that pattern with
+   `DoubleArrayBacked::from_backing(backing)`. For `memmap2::Mmap`
+   specifically, wrap the mapping in a local newtype that
+   implements `AsRef<[u8]>` + `unsafe impl StableBacking`.
+   Migration is now mandatory in spirit: while
+   `DoubleArrayRef`'s layout size is unchanged, its internal
+   field types switched from `&'a [T]` to `(*const T, usize)`
+   pairs, so a transmute that happened to satisfy Stacked
+   Borrows under 0.3 may behave differently under 0.4 even
+   though the byte layout matches.
+   Note: if your `open()` function also stores *other*
+   `&'static` slices into the same mmap (string pools, index
+   tables, etc.), those still need their own bundling solution
+   — `DoubleArrayBacked` only covers the trie view. You can
+   apply the same self-referential-newtype recipe for them.
+6. If you were cloning a `DoubleArrayBacked<L, Vec<u8>>` or
+   `DoubleArrayBacked<L, Box<[u8]>>`, replace `.clone()` with
+   `.try_clone()?` or `.try_clone().expect(...)`. The infallible
+   `Clone` impl is now gated on `B: CloneStableBacking`, which
+   `Vec<u8>` / `Box<[u8]>` deliberately do not implement (their
+   `Clone` allocates a fresh buffer at a potentially different
+   alignment, so re-parsing can fail). To keep the infallible
+   `.clone()` ergonomics, wrap the buffer up-front as
+   `Arc::<[u8]>::from(buf)` or `Rc::<[u8]>::from(buf)` — both
+   are pre-blessed `CloneStableBacking`.
+
+Existing serialised buffers (v3 format, 0.3.0 and 0.3.1) load
+unchanged; the binary format itself is unchanged.
+
 ## 0.3.1 — 2026-04-15
 
 Non-breaking polish on top of 0.3.0. No public API changes.

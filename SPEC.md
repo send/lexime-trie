@@ -117,7 +117,7 @@ pub struct CodeMapper {
 ```
 
 - At build time, label frequencies across all keys are counted; higher-frequency labels receive smaller codes
-- Example: ~80 hiragana + ~80 katakana + ~3000 kanji → effective ALPHABET_SIZE ≈ 4000
+- Example: ~80 hiragana + ~80 katakana + ~3000 kanji → effective alphabet size ≈ 4000
 - Code 0 is reserved for the terminal symbol
 - Same approach as crawdad's Mapped scheme (Kanda et al. 2023)
 - `reverse_table` is used for key reconstruction in `predictive_search`
@@ -168,23 +168,15 @@ lexime integration:
 ### Label Trait
 
 ```rust
-pub trait Label: Copy + Ord + Into<u32> + TryFrom<u32> {
-    /// Maximum label value + 1 (used for array allocation)
-    const ALPHABET_SIZE: u32;
-}
+pub trait Label: Copy + Ord + Into<u32> + TryFrom<u32> {}
 
-impl Label for u8 {
-    const ALPHABET_SIZE: u32 = 256;
-}
-
-impl Label for char {
-    const ALPHABET_SIZE: u32 = 0x11_0000;
-}
+impl Label for u8 {}
+impl Label for char {}
 ```
 
 Dictionary trie uses `DoubleArray<char>` + CodeMapper; romaji trie uses `DoubleArray<u8>`.
-CodeMapper compresses the effective label space to ~4000, so `char::ALPHABET_SIZE` does not
-affect the array size.
+CodeMapper compresses the effective label space to ~4000, so the size of the raw label
+space (e.g. `char`'s 0x11_0000 codepoints) does not affect the array size.
 
 ### DoubleArray
 
@@ -310,13 +302,14 @@ Offset                        Size       Content
   are at least 4-byte aligned, satisfying `Node` and `u32` requirements.
 - Raw `#[repr(C)]` data (little-endian), enabling zero-copy deserialization.
 - **Little-endian only** (enforced by `compile_error!`).
-- **v2 compatibility was dropped at v0.3**. `from_bytes` / `from_bytes_ref`
-  return `InvalidVersion` for version != 3. Persisted v2 files must be
-  rebuilt from the original keys.
+- **v2 compatibility was dropped at v0.3**. `DoubleArray::from_bytes` /
+  `DoubleArrayRef::from_bytes` return `InvalidVersion` for version != 3.
+  Persisted v2 files must be rebuilt from the original keys.
 
 #### Load-time validation
 
-`from_bytes` / `from_bytes_ref` run only O(1) checks:
+`DoubleArray::from_bytes` / `DoubleArrayRef::from_bytes` run only O(1)
+checks:
 
 - Magic, version, buffer size arithmetic.
 - `nodes_count >= 2` (sentinel + root).
@@ -334,36 +327,46 @@ separately.
 
 ```rust
 pub struct DoubleArrayRef<'a, L: Label> {
-    nodes: &'a [Node],            // borrowed from byte buffer
-    child_offsets: &'a [u32],     // borrowed from byte buffer
-    children_list: &'a [u32],     // borrowed from byte buffer
-    code_map: CodeMapper,         // always heap-allocated (small)
-    _phantom: PhantomData<L>,
+    // Sections are stored as (raw pointer, length) pairs rather than
+    // `&'a [T]` references. The `PhantomData<&'a [u8]>` carries the
+    // borrow lifetime; `view()` materialises real slices on demand.
+    // See the type's rustdoc for why raw pointers (Stacked Borrows
+    // interaction with `DoubleArrayBacked`'s self-referential layout).
+    nodes_ptr: *const Node,
+    nodes_len: usize,
+    child_offsets_ptr: *const u32,
+    child_offsets_len: usize,
+    children_list_ptr: *const u32,
+    children_list_len: usize,
+    code_map: CodeMapper,                // always heap-allocated (small)
+    _marker: PhantomData<(&'a [u8], L)>,
 }
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// Zero-copy deserialization from a byte slice (v3 format only).
     /// The buffer must be aligned to at least 4 bytes (for `Node` and `u32` access).
-    pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError>;
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, TrieError>;
 
-    /// All search methods: exact_match, common_prefix_search,
-    /// predictive_search, probe — identical API to DoubleArray.
+    /// All search methods are provided by the `TrieSearch` trait:
+    /// exact_match, common_prefix_search, predictive_search, probe.
 
     /// Converts to an owned DoubleArray by copying the borrowed sections to heap.
     pub fn to_owned(&self) -> DoubleArray<L>;
 }
 ```
 
-- `nodes`, `child_offsets`, and `children_list` are borrowed directly from
+- `nodes`, `child_offsets`, and `children_list` reference data directly in
   the byte buffer via `unsafe` pointer cast.
 - Safety relies on: `Node` being `#[repr(C)]` (8B, align 4, no padding),
   runtime alignment validation, and the LE-only target assumption.
 - `code_map` is always deserialized to heap (small, requires reconstruction
   from serialized form).
-- `from_bytes_ref` requires the LXTR v3 format (24-byte aligned header).
-- `from_bytes_ref` is O(1) after the initial header parse — no loops over
+- `from_bytes` requires the LXTR v3 format (24-byte aligned header).
+- `from_bytes` is O(1) after the initial header parse — no loops over
   `nodes`, `child_offsets`, or `children_list`.
-- Typical use case: memory-map a file, then pass the buffer to `from_bytes_ref`.
+- Typical use case: memory-map a file, then pass the buffer to `from_bytes`
+  (or to `DoubleArrayBacked::from_backing` if you want the buffer and view
+  bundled into one owning value).
 
 ### Shared Search Logic (TrieView)
 
@@ -500,7 +503,7 @@ lexime/
 5. **predictive_search** — needed for prediction (uses `children_list`) ✅
 6. **probe** — needed for romaji trie ✅
 7. **as_bytes / from_bytes** — serialization (LXTR v3 format) ✅
-8. **DoubleArrayRef / from_bytes_ref** — zero-copy mmap deserialization ✅
+8. **DoubleArrayRef / from_bytes** — zero-copy mmap deserialization ✅
 9. **v3 migration** — drop v2, move root to `nodes[1]`, replace siblings with CSR ✅
 10. **lexime integration** — replace TrieDictionary and RomajiTrie internals
 
