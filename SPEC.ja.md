@@ -299,12 +299,14 @@ Offset                        Size       内容
   以上のアライメントを満たし、`Node`/`u32` 要件を保持
 - 生データは `#[repr(C)]` (little-endian) で zero-copy デシリアライズ可能
 - **リトルエンディアン専用** (`compile_error!` で強制)
-- **v0.3 で v2 互換を破棄**。`from_bytes` / `from_bytes_ref` は version != 3 で
-  `InvalidVersion` を返す。v2 で永続化したファイルは元キーから再構築が必要
+- **v0.3 で v2 互換を破棄**。`DoubleArray::from_bytes` /
+  `DoubleArrayRef::from_bytes` は version != 3 で `InvalidVersion` を
+  返す。v2 で永続化したファイルは元キーから再構築が必要
 
 #### ロード時の検証
 
-`from_bytes` / `from_bytes_ref` は O(1) のチェックのみ行う:
+`DoubleArray::from_bytes` / `DoubleArrayRef::from_bytes` は O(1) の
+チェックのみ行う:
 
 - Magic、version、buffer サイズの算術
 - `nodes_count >= 2` (sentinel + root)
@@ -321,20 +323,28 @@ Offset                        Size       内容
 
 ```rust
 pub struct DoubleArrayRef<'a, L: Label> {
-    nodes: &'a [Node],            // バイトバッファから借用
-    child_offsets: &'a [u32],     // バイトバッファから借用
-    children_list: &'a [u32],     // バイトバッファから借用
-    code_map: CodeMapper,         // 常にヒープ確保 (小さいため)
-    _phantom: PhantomData<L>,
+    // 各セクションは `&'a [T]` ではなく (生ポインタ, 長さ) のペアで保持。
+    // `PhantomData<&'a [u8]>` が借用ライフタイムを担い、`view()` が
+    // 必要時に実スライスをマテリアライズする。生ポインタを採用する
+    // 理由は型の rustdoc を参照 (`DoubleArrayBacked` の自己参照
+    // 構造と Stacked Borrows の相互作用)。
+    nodes_ptr: *const Node,
+    nodes_len: usize,
+    child_offsets_ptr: *const u32,
+    child_offsets_len: usize,
+    children_list_ptr: *const u32,
+    children_list_len: usize,
+    code_map: CodeMapper,                // 常にヒープ確保 (小さいため)
+    _marker: PhantomData<(&'a [u8], L)>,
 }
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// バイト列から zero-copy でデシリアライズ (v3 フォーマットのみ)。
     /// バッファは 4 バイト以上のアライメントが必要 (`Node` および `u32` アクセスのため)。
-    pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError>;
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, TrieError>;
 
-    /// 全検索メソッド: exact_match, common_prefix_search,
-    /// predictive_search, probe — DoubleArray と同一の API。
+    /// 全検索メソッドは `TrieSearch` トレイトで提供:
+    /// exact_match, common_prefix_search, predictive_search, probe。
 
     /// 借用セクションをヒープにコピーして owned な DoubleArray に変換する。
     pub fn to_owned(&self) -> DoubleArray<L>;
@@ -342,14 +352,16 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
 ```
 
 - `nodes`、`child_offsets`、`children_list` は `unsafe` ポインタキャストで
-  バイトバッファから直接借用
+  バイトバッファ内のデータを直接参照
 - 安全性の根拠: `Node` が `#[repr(C)]` (8B, align 4, パディングなし)、
   実行時アライメント検証、LE ターゲット前提 (x86_64/aarch64)
 - `code_map` はシリアライズ形式からの復元が必要なため常にヒープにデシリアライズ (小さいため問題なし)
-- `from_bytes_ref` は LXTR v3 フォーマット (24 バイトアライメント済みヘッダ) が必要
-- `from_bytes_ref` は最初のヘッダ parse 以降 O(1) — `nodes` / `child_offsets` /
+- `from_bytes` は LXTR v3 フォーマット (24 バイトアライメント済みヘッダ) が必要
+- `from_bytes` は最初のヘッダ parse 以降 O(1) — `nodes` / `child_offsets` /
   `children_list` を走査しない
-- 典型的な使い方: ファイルを mmap して `from_bytes_ref` に渡す
+- 典型的な使い方: ファイルを mmap して `from_bytes` に渡す
+  (バッファと view を 1 つの owning 値にまとめたい場合は
+  `DoubleArrayBacked::from_backing` を使う)
 
 ### 検索ロジック共有 (TrieView)
 
@@ -484,7 +496,7 @@ lexime/
 5. **predictive_search** — 予測候補に必要 (`children_list` 使用) ✅
 6. **probe** — ローマ字 Trie に必要 ✅
 7. **as_bytes / from_bytes** — シリアライズ (LXTR v3 フォーマット) ✅
-8. **DoubleArrayRef / from_bytes_ref** — zero-copy mmap デシリアライズ ✅
+8. **DoubleArrayRef / from_bytes** — zero-copy mmap デシリアライズ ✅
 9. **v3 移行** — v2 破棄、root を `nodes[1]` に移動、siblings を CSR に置換 ✅
 10. **lexime 統合** — TrieDictionary と RomajiTrie の内部を差し替え
 

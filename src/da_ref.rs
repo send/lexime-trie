@@ -16,14 +16,36 @@ use crate::{
 ///
 /// `code_map` is always heap-allocated since it is small and requires
 /// deserialization.
+///
+/// # Internal representation
+///
+/// Internally this stores **raw pointers + lengths** rather than real
+/// `&'a [T]` slices because [`DoubleArrayBacked`] holds a
+/// `DoubleArrayRef<'static, L>` co-located with the byte buffer it
+/// borrows from: if the inner type contained real shared references
+/// Stacked Borrows would treat them as strongly-protected during
+/// `drop`, conflicting with reclamation of the backing storage.
 #[derive(Clone)]
 pub struct DoubleArrayRef<'a, L: Label> {
-    pub(crate) nodes: &'a [Node],
-    pub(crate) child_offsets: &'a [u32],
-    pub(crate) children_list: &'a [u32],
+    nodes_ptr: *const Node,
+    nodes_len: usize,
+    child_offsets_ptr: *const u32,
+    child_offsets_len: usize,
+    children_list_ptr: *const u32,
+    children_list_len: usize,
     pub(crate) code_map: CodeMapper,
-    pub(crate) _phantom: PhantomData<L>,
+    _marker: PhantomData<(&'a [u8], L)>,
 }
+
+// SAFETY: The raw pointer fields point into a `[u8]` borrow that is
+// tracked by the `PhantomData<&'a [u8]>` marker. Shared `&[u8]` is
+// `Send + Sync`; reconstructing `&[Node]` / `&[u32]` over the same
+// memory inside `view()` is equivalent to holding those shared slices,
+// which are likewise `Send + Sync`. `CodeMapper` (owned `Vec<u32>` +
+// `u32`) and `Label` implementors (`u8`, `char`) are `Send + Sync`.
+// Raw pointers lose these auto-traits by default, so we re-assert them.
+unsafe impl<'a, L: Label> Send for DoubleArrayRef<'a, L> {}
+unsafe impl<'a, L: Label> Sync for DoubleArrayRef<'a, L> {}
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// Creates a zero-copy `DoubleArrayRef` from a byte slice (v3 format only).
@@ -62,19 +84,22 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
 
         let child_offsets_count = header.nodes_count + 1;
 
+        // Validate through transient slices; store as (ptr, len) to avoid
+        // long-lived `&[T]` references inside `Self` (see struct-level doc).
+        //
         // SAFETY:
         // - `Node` is `#[repr(C)]` with two `u32` fields, size 8, align 4, no padding.
         // - `u32` is size 4 align 4 with no invalid bit patterns.
-        // - We verified alignment and bounds above.
-        // - The lifetime `'a` ties the slices to the input buffer.
+        // - We verified alignment and bounds above (via `HeaderV3::parse`).
+        // - The lifetime `'a` of the transient slices is tied to the input buffer.
         // - We only support little-endian platforms where the in-memory layout
         //   matches the serialized LE format.
-        let nodes =
+        let nodes: &'a [Node] =
             unsafe { std::slice::from_raw_parts(nodes_ptr as *const Node, header.nodes_count) };
-        let child_offsets = unsafe {
+        let child_offsets: &'a [u32] = unsafe {
             std::slice::from_raw_parts(child_offsets_ptr as *const u32, child_offsets_count)
         };
-        let children_list = unsafe {
+        let children_list: &'a [u32] = unsafe {
             std::slice::from_raw_parts(children_list_ptr as *const u32, header.children_count)
         };
 
@@ -87,32 +112,50 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
         .ok_or(TrieError::TruncatedData)?;
 
         Ok(Self {
-            nodes,
-            child_offsets,
-            children_list,
+            nodes_ptr: nodes.as_ptr(),
+            nodes_len: nodes.len(),
+            child_offsets_ptr: child_offsets.as_ptr(),
+            child_offsets_len: child_offsets.len(),
+            children_list_ptr: children_list.as_ptr(),
+            children_list_len: children_list.len(),
             code_map,
-            _phantom: PhantomData,
+            _marker: PhantomData,
         })
     }
 
-    /// Returns a `TrieView` borrowing this ref's data.
+    /// Materialise a `TrieView` whose slice lifetimes are tied to `&self`.
     #[inline]
-    fn view(&self) -> TrieView<'_, L> {
-        TrieView {
-            nodes: self.nodes,
-            child_offsets: self.child_offsets,
-            children_list: self.children_list,
-            code_map: &self.code_map,
-            _phantom: PhantomData,
+    pub(crate) fn view(&self) -> TrieView<'_, L> {
+        // SAFETY: the three raw pointers were produced during construction
+        // from slices borrowed for `'a` (or `'static` synthesised by
+        // `DoubleArrayBacked`). The `PhantomData<&'a [u8]>` marker ensures
+        // `&self` cannot outlive the underlying buffer, so the reconstructed
+        // slices are valid for the returned `'_` lifetime. Alignment, bounds,
+        // and layout were all checked in `from_bytes`.
+        unsafe {
+            TrieView {
+                nodes: std::slice::from_raw_parts(self.nodes_ptr, self.nodes_len),
+                child_offsets: std::slice::from_raw_parts(
+                    self.child_offsets_ptr,
+                    self.child_offsets_len,
+                ),
+                children_list: std::slice::from_raw_parts(
+                    self.children_list_ptr,
+                    self.children_list_len,
+                ),
+                code_map: &self.code_map,
+                _phantom: PhantomData,
+            }
         }
     }
 
     /// Converts this zero-copy reference to an owned [`DoubleArray`].
     pub fn to_owned(&self) -> DoubleArray<L> {
+        let view = self.view();
         DoubleArray::new(
-            self.nodes.to_vec(),
-            self.child_offsets.to_vec(),
-            self.children_list.to_vec(),
+            view.nodes.to_vec(),
+            view.child_offsets.to_vec(),
+            view.children_list.to_vec(),
             self.code_map.clone(),
         )
     }
@@ -122,8 +165,8 @@ impl<'a, L: Label> std::fmt::Debug for DoubleArrayRef<'a, L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Avoid dumping the whole nodes array; show shape instead.
         f.debug_struct("DoubleArrayRef")
-            .field("node_slots", &self.nodes.len())
-            .field("children", &self.children_list.len())
+            .field("node_slots", &self.nodes_len)
+            .field("children", &self.children_list_len)
             .finish()
     }
 }
@@ -131,7 +174,7 @@ impl<'a, L: Label> std::fmt::Debug for DoubleArrayRef<'a, L> {
 impl<'a, L: Label> TrieSearch<L> for DoubleArrayRef<'a, L> {
     #[inline]
     fn node_slot_count(&self) -> usize {
-        self.nodes.len()
+        self.nodes_len
     }
 
     #[inline]
@@ -159,7 +202,8 @@ impl<'a, L: Label> TrieSearch<L> for DoubleArrayRef<'a, L> {
     }
 
     fn validate_strict(&self) -> Result<(), TrieError> {
-        crate::serial::validate_strict(self.nodes, self.child_offsets, self.children_list)
+        let view = self.view();
+        crate::serial::validate_strict(view.nodes, view.child_offsets, view.children_list)
     }
 }
 
@@ -332,5 +376,20 @@ mod tests {
         let buf = AlignedBytes::new(&da.as_bytes());
         let da_ref = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
         assert_eq!(da_ref.node_slot_count(), da.node_slot_count());
+    }
+
+    #[test]
+    fn clone_aliases_same_buffer() {
+        // The derived `Clone` shallow-copies the raw pointers; both
+        // copies alias into the original byte buffer. Dropping one
+        // copy must not invalidate the other.
+        let keys: Vec<&[u8]> = vec![b"a", b"ab"];
+        let da = build_u8(&keys);
+        let buf = AlignedBytes::new(&da.as_bytes());
+        let r1 = DoubleArrayRef::<u8>::from_bytes(buf.as_slice()).unwrap();
+        let r2 = r1.clone();
+        drop(r1);
+        assert_eq!(r2.exact_match(b"a"), Some(0));
+        assert_eq!(r2.exact_match(b"ab"), Some(1));
     }
 }

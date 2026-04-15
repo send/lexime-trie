@@ -1,10 +1,4 @@
-use std::marker::PhantomData;
-
-use crate::view::TrieView;
-use crate::{
-    CodeMapper, DoubleArrayRef, Label, Node, PrefixMatch, ProbeResult, SearchMatch, TrieError,
-    TrieSearch,
-};
+use crate::{DoubleArrayRef, Label, PrefixMatch, ProbeResult, SearchMatch, TrieError, TrieSearch};
 
 /// Marker trait for byte buffers whose data pointer is stable across
 /// moves of the buffer itself.
@@ -96,9 +90,7 @@ unsafe impl StableBacking for &[u8] {}
 ///
 /// Internally this is a self-referential structure: the stored view
 /// borrows into the stored backing. The public API never leaks the
-/// internal `'static` lifetime, and Rust's drop order (fields drop in
-/// declaration order — view first, backing second) keeps the borrow
-/// valid for the whole lifetime of `self`.
+/// internal `'static` lifetime.
 ///
 /// # Backing requirements
 ///
@@ -109,40 +101,19 @@ unsafe impl StableBacking for &[u8] {}
 /// external type such as `memmap2::Mmap`, see the [`StableBacking`]
 /// trait docs for the newtype + `unsafe impl` pattern.
 pub struct DoubleArrayBacked<L: Label, B: StableBacking> {
-    // Raw pointer + length for each of the three sections. We
-    // deliberately do NOT store `&'static [T]` here: under stacked
-    // borrows, passing a value that contains shared references (even
-    // with a synthesised `'static` lifetime) into `drop` would retag
-    // those references as protected, and the subsequent reclamation
-    // of `backing`'s storage would then fail the Miri check with
-    // "would remove [SharedReadOnly for …] which is strongly
-    // protected". Raw pointers carry no aliasing protection, so the
-    // drop of `backing` is unobstructed.
-    //
-    // `(thin ptr, len)` pairs instead of `*const [T]` fat pointers
-    // sidestep the `dangerous_implicit_autorefs` lint that fires on
-    // `&*self.fat_ptr` — explicit `slice::from_raw_parts(ptr, len)`
-    // makes the provenance clear.
-    nodes_ptr: *const Node,
-    nodes_len: usize,
-    child_offsets_ptr: *const u32,
-    child_offsets_len: usize,
-    children_list_ptr: *const u32,
-    children_list_len: usize,
-    code_map: CodeMapper,
+    // `DoubleArrayRef` stores its sections as raw pointers, so
+    // embedding a `DoubleArrayRef<'static, L>` is sound under Stacked
+    // Borrows: the inner value carries no shared references that
+    // drop-time retagging would protect. The synthesised `'static`
+    // lifetime is never exposed — `as_view` down-casts it to `'_`.
+    view: DoubleArrayRef<'static, L>,
     backing: B,
-    _phantom: PhantomData<L>,
 }
 
-// SAFETY: The raw pointer fields point into `backing`'s owned storage.
-// For `Send`/`Sync` we require `B` itself to be `Send`/`Sync` — if the
-// backing can safely cross a thread boundary (or be shared between
-// threads), the pointers into it can too. `CodeMapper` is plain owned
-// data (`Vec<u32>` + `u32`), which is always `Send + Sync`. `Label`
-// implementors (`u8`, `char`) are `Send + Sync`. Raw pointers lose
-// these auto-traits by default, so we re-assert them manually.
-unsafe impl<L: Label, B: StableBacking + Send> Send for DoubleArrayBacked<L, B> {}
-unsafe impl<L: Label, B: StableBacking + Sync> Sync for DoubleArrayBacked<L, B> {}
+// `DoubleArrayRef<'static, L>` is `Send + Sync` (see its unsafe impls),
+// and `B` carries its own auto-traits, so `DoubleArrayBacked<L, B>`
+// picks up `Send`/`Sync` via ordinary auto-derivation whenever `B`
+// does. No manual unsafe impl is needed.
 
 impl<L: Label, B: StableBacking> DoubleArrayBacked<L, B> {
     /// Parse `backing` as a v3 trie buffer and bundle the two together.
@@ -152,51 +123,41 @@ impl<L: Label, B: StableBacking> DoubleArrayBacked<L, B> {
         let bytes: &[u8] = backing.as_ref();
         // SAFETY: `B: StableBacking` guarantees that `bytes.as_ptr()`
         // remains valid after `backing` is moved into `Self` below.
-        // The synthesised `'static` lifetime exists only for the
-        // duration of this function — long enough to parse through
-        // `DoubleArrayRef::from_bytes` — and is discarded into raw
-        // pointers before we return.
+        // The synthesised `'static` lifetime is used only to satisfy
+        // the `DoubleArrayRef` type parameter; the inner type stores
+        // raw pointers so no `&'static` references escape.
         let bytes_static: &'static [u8] =
             unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
-        let view = DoubleArrayRef::<L>::from_bytes(bytes_static)?;
-        Ok(Self {
-            nodes_ptr: view.nodes.as_ptr(),
-            nodes_len: view.nodes.len(),
-            child_offsets_ptr: view.child_offsets.as_ptr(),
-            child_offsets_len: view.child_offsets.len(),
-            children_list_ptr: view.children_list.as_ptr(),
-            children_list_len: view.children_list.len(),
-            code_map: view.code_map,
-            backing,
-            _phantom: PhantomData,
-        })
+        let view = DoubleArrayRef::<'static, L>::from_bytes(bytes_static)?;
+        Ok(Self { view, backing })
     }
 
-    /// Materialise a `TrieView` whose slice lifetimes are tied to
-    /// `&self`. The raw-pointer fields are guaranteed valid for the
-    /// whole lifetime of `self` (since `backing` is owned here).
+    /// Borrow the inner zero-copy view.
+    ///
+    /// The returned reference's lifetime is tied to `&self`, so the
+    /// synthesised `'static` lifetime on the stored view is never
+    /// observable by callers. This is a zero-cost coercion (covariant
+    /// lifetime narrowing on `DoubleArrayRef`).
+    ///
+    /// Use this to pass the borrowed view to a function that accepts
+    /// `&DoubleArrayRef<'_, L>`:
+    ///
+    /// ```
+    /// use lexime_trie::{DoubleArray, DoubleArrayBacked, DoubleArrayRef, Label, TrieSearch};
+    ///
+    /// fn lookup<L: Label>(view: &DoubleArrayRef<'_, L>, key: &[L]) -> Option<u32> {
+    ///     view.exact_match(key)
+    /// }
+    ///
+    /// let bytes: Vec<u8> = DoubleArray::<u8>::build(&[b"hi".as_slice()]).as_bytes();
+    /// let trie: DoubleArrayBacked<u8, Vec<u8>> =
+    ///     DoubleArrayBacked::from_backing(bytes)?;
+    /// assert_eq!(lookup(trie.as_view(), b"hi"), Some(0));
+    /// # Ok::<(), lexime_trie::TrieError>(())
+    /// ```
     #[inline]
-    fn view(&self) -> TrieView<'_, L> {
-        // SAFETY: the three raw pointers were produced from
-        // `backing.as_ref()` during construction. `backing` is owned
-        // by `self`, `B: StableBacking` guarantees the address is
-        // stable across moves, and we are borrowing through `&self`
-        // so the resulting references cannot outlive `backing`.
-        unsafe {
-            TrieView {
-                nodes: std::slice::from_raw_parts(self.nodes_ptr, self.nodes_len),
-                child_offsets: std::slice::from_raw_parts(
-                    self.child_offsets_ptr,
-                    self.child_offsets_len,
-                ),
-                children_list: std::slice::from_raw_parts(
-                    self.children_list_ptr,
-                    self.children_list_len,
-                ),
-                code_map: &self.code_map,
-                _phantom: PhantomData,
-            }
-        }
+    pub fn as_view(&self) -> &DoubleArrayRef<'_, L> {
+        &self.view
     }
 
     /// Consume this wrapper and return the backing buffer.
@@ -228,8 +189,7 @@ impl<L: Label, B: StableBacking + Clone> Clone for DoubleArrayBacked<L, B> {
 impl<L: Label, B: StableBacking> std::fmt::Debug for DoubleArrayBacked<L, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DoubleArrayBacked")
-            .field("node_slots", &self.nodes_len)
-            .field("children", &self.children_list_len)
+            .field("view", &self.view)
             .field("backing_len", &self.backing.as_ref().len())
             .finish()
     }
@@ -238,37 +198,36 @@ impl<L: Label, B: StableBacking> std::fmt::Debug for DoubleArrayBacked<L, B> {
 impl<L: Label, B: StableBacking> TrieSearch<L> for DoubleArrayBacked<L, B> {
     #[inline]
     fn node_slot_count(&self) -> usize {
-        self.nodes_len
+        self.view.node_slot_count()
     }
 
     #[inline]
     fn exact_match(&self, key: &[L]) -> Option<u32> {
-        self.view().exact_match(key)
+        self.view.exact_match(key)
     }
 
     fn common_prefix_search<'a>(
         &'a self,
         query: &'a [L],
     ) -> impl Iterator<Item = PrefixMatch> + 'a {
-        self.view().common_prefix_search(query)
+        self.view.common_prefix_search(query)
     }
 
     fn predictive_search<'a>(
         &'a self,
         prefix: &'a [L],
     ) -> impl Iterator<Item = SearchMatch<L>> + 'a {
-        self.view().predictive_search(prefix)
+        self.view.predictive_search(prefix)
     }
 
     #[inline]
     fn probe(&self, key: &[L]) -> ProbeResult {
-        self.view().probe(key)
+        self.view.probe(key)
     }
 
     #[inline]
     fn validate_strict(&self) -> Result<(), TrieError> {
-        let view = self.view();
-        crate::serial::validate_strict(view.nodes, view.child_offsets, view.children_list)
+        self.view.validate_strict()
     }
 }
 
@@ -350,6 +309,25 @@ mod tests {
         assert_sync::<DoubleArrayBacked<u8, std::sync::Arc<[u8]>>>();
         assert_send::<DoubleArrayRef<'static, u8>>();
         assert_sync::<DoubleArrayRef<'static, u8>>();
+        assert_send::<DoubleArrayRef<'static, char>>();
+        assert_sync::<DoubleArrayRef<'static, char>>();
+    }
+
+    #[test]
+    fn backed_as_view_is_borrow_checked() {
+        // `as_view()` returns `&DoubleArrayRef<'_, L>` whose lifetime is
+        // tied to `&self`; the synthesised `'static` is never observable.
+        // A free function taking `&DoubleArrayRef<'_, L>` must accept
+        // the borrow without an explicit lifetime annotation.
+        fn search<L: crate::Label>(v: &DoubleArrayRef<'_, L>, k: &[L]) -> Option<u32> {
+            v.exact_match(k)
+        }
+        let da = DoubleArray::<u8>::build(&[b"hello".as_slice(), b"hi"]);
+        let trie =
+            DoubleArrayBacked::<u8, _>::from_backing(AlignedBytes::new(&da.as_bytes())).unwrap();
+        assert_eq!(search(trie.as_view(), b"hello"), Some(0));
+        assert_eq!(search(trie.as_view(), b"hi"), Some(1));
+        assert_eq!(search(trie.as_view(), b"miss"), None);
     }
 
     #[test]

@@ -89,6 +89,18 @@ wrapper for the zero-copy view.
 - **`DoubleArrayRef<'a, L>` now derives `Clone`** and implements
   a compact `Debug`. `DoubleArrayBacked<L, B>` gains the same
   derives (hand-written to re-parse on clone).
+- **`DoubleArrayBacked::as_view() -> &DoubleArrayRef<'_, L>`.**
+  Borrow the inner zero-copy view without consuming the wrapper.
+  The returned reference's lifetime is tied to `&self`, so the
+  internally-synthesised `'static` lifetime is never observable.
+
+### Internal
+
+- **`DoubleArrayRef` now stores raw pointers instead of `&'a [T]`
+  slices.** Public API and type layout size are unchanged. The
+  change lets `DoubleArrayBacked` embed a plain
+  `DoubleArrayRef<'static, L>` field without tripping Stacked Borrows'
+  strong-protection rule on drop.
 
 ### Migration (0.3.x → 0.4.0)
 
@@ -109,6 +121,12 @@ wrapper for the zero-copy view.
    `DoubleArrayBacked::from_backing(backing)`. For `memmap2::Mmap`
    specifically, wrap the mapping in a local newtype that
    implements `AsRef<[u8]>` + `unsafe impl StableBacking`.
+   Migration is now mandatory in spirit: while
+   `DoubleArrayRef`'s layout size is unchanged, its internal
+   field types switched from `&'a [T]` to `(*const T, usize)`
+   pairs, so a transmute that happened to satisfy Stacked
+   Borrows under 0.3 may behave differently under 0.4 even
+   though the byte layout matches.
    Note: if your `open()` function also stores *other*
    `&'static` slices into the same mmap (string pools, index
    tables, etc.), those still need their own bundling solution
