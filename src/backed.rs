@@ -147,6 +147,33 @@ impl<L: Label, B: StableBacking> DoubleArrayBacked<L, B> {
     }
 }
 
+impl<L: Label, B: StableBacking + Clone> Clone for DoubleArrayBacked<L, B> {
+    fn clone(&self) -> Self {
+        // The obvious `#[derive(Clone)]` would be UNSOUND: it would
+        // copy `self.view` (whose cached pointers refer to the
+        // *original* `self.backing`) alongside a fresh `self.backing`
+        // at a different address. The clone would dangle as soon as
+        // the original drops. Instead re-parse from the cloned
+        // backing so `view`'s pointers target the new buffer.
+        //
+        // `expect` cannot fire in practice: `self.backing` was already
+        // parsed successfully during construction, and `B: Clone` is
+        // expected to produce an identical byte sequence.
+        Self::from_backing(self.backing.clone())
+            .expect("cloning a validated backing should reproduce a valid view")
+    }
+}
+
+impl<L: Label, B: StableBacking> std::fmt::Debug for DoubleArrayBacked<L, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Show the inner view's shape; the backing is opaque from here.
+        f.debug_struct("DoubleArrayBacked")
+            .field("view", &self.view)
+            .field("backing_len", &self.backing.as_ref().len())
+            .finish()
+    }
+}
+
 impl<L: Label, B: StableBacking> TrieSearch<L> for DoubleArrayBacked<L, B> {
     #[inline]
     fn node_slot_count(&self) -> usize {
@@ -255,5 +282,50 @@ mod tests {
     fn backed_invalid_bytes_returns_error() {
         let trie = DoubleArrayBacked::<u8, _>::from_backing(AlignedBytes::new(b"garbage"));
         assert!(trie.is_err());
+    }
+
+    #[test]
+    fn backed_auto_traits() {
+        // Compile-time assertion that the expected auto-traits are
+        // preserved. If a future internal change introduces a `Cell` or
+        // other non-`Sync` field, this will fail to compile and force
+        // the regression to be addressed deliberately.
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<DoubleArrayBacked<u8, Vec<u8>>>();
+        assert_sync::<DoubleArrayBacked<u8, Vec<u8>>>();
+        assert_send::<DoubleArrayBacked<u8, std::sync::Arc<[u8]>>>();
+        assert_sync::<DoubleArrayBacked<u8, std::sync::Arc<[u8]>>>();
+        assert_send::<DoubleArrayRef<'static, u8>>();
+        assert_sync::<DoubleArrayRef<'static, u8>>();
+    }
+
+    #[test]
+    fn backed_survives_thread_handoff() {
+        // A `DoubleArrayBacked` is `Send` when its backing is; moving
+        // it to a different thread must keep the internal `'static`
+        // borrow valid. Miri stress-tests the pointer provenance here.
+        let da = DoubleArray::<u8>::build(&[b"hello".as_slice(), b"world"]);
+        let backing = AlignedBytes::new(&da.as_bytes());
+        let trie = DoubleArrayBacked::<u8, _>::from_backing(backing).unwrap();
+        let result = std::thread::spawn(move || trie.exact_match(b"hello"))
+            .join()
+            .unwrap();
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn backed_clone_reparses_from_cloned_backing() {
+        // The hand-written `Clone` re-parses the cloned backing rather
+        // than copying `view`'s stale pointers. Verify the clone stands
+        // on its own after the original is dropped.
+        let keys: Vec<&[u8]> = vec![b"abc", b"xyz"];
+        let da = DoubleArray::<u8>::build(&keys);
+        let original =
+            DoubleArrayBacked::<u8, _>::from_backing(AlignedBytes::new(&da.as_bytes())).unwrap();
+        let cloned = original.clone();
+        drop(original); // The clone's view must borrow into its own backing.
+        assert_eq!(cloned.exact_match(b"abc"), Some(0));
+        assert_eq!(cloned.exact_match(b"xyz"), Some(1));
     }
 }

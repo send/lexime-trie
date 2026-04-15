@@ -16,6 +16,7 @@ use crate::{
 ///
 /// `code_map` is always heap-allocated since it is small and requires
 /// deserialization.
+#[derive(Clone)]
 pub struct DoubleArrayRef<'a, L: Label> {
     nodes: &'a [Node],
     child_offsets: &'a [u32],
@@ -114,6 +115,16 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
             self.children_list.to_vec(),
             self.code_map.clone(),
         )
+    }
+}
+
+impl<'a, L: Label> std::fmt::Debug for DoubleArrayRef<'a, L> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Avoid dumping the whole nodes array; show shape instead.
+        f.debug_struct("DoubleArrayRef")
+            .field("node_slots", &self.nodes.len())
+            .field("children", &self.children_list.len())
+            .finish()
     }
 }
 
