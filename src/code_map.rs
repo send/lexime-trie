@@ -11,11 +11,14 @@ use crate::Label;
 /// 0xA000, so the dense array costs at most ~320 KB — a clear win over
 /// HashMap overhead.
 ///
-/// For keys that include emoji (U+1F000+) or supplementary planes the dense
-/// array balloons (U+10FFFF → 8 MB just for the freq table plus ~4 MB for
-/// the forward lookup `table`). The HashMap path scales with distinct
-/// labels instead, so pathological inputs stay bounded at the cost of a
-/// slower build.
+/// For keys that include emoji (U+1F000+) or supplementary planes the
+/// dense freq array balloons (U+10FFFF → 8 MB). The HashMap branch only
+/// bounds *that* counting structure by the number of distinct labels —
+/// the forward lookup `table: Vec<u32>` is still allocated densely up to
+/// `max_label + 1` regardless, because `get()` is the hot search path
+/// and must stay O(1). So the threshold trades one transient 8 MB
+/// allocation for HashMap overhead during build, while the persistent
+/// `table` still scales with `max_label`.
 ///
 /// 65_536 is chosen as the cutoff: it covers the BMP entirely (typical
 /// Japanese-only dictionaries stay well under it) and caps the dense
@@ -146,57 +149,56 @@ impl CodeMapper {
     }
 
     /// Returns the serialised size in bytes (without allocating).
+    ///
+    /// Uses checked arithmetic to match the style of `serial::as_bytes`
+    /// and `CodeMapper::from_bytes`. A wrapped value here would feed a
+    /// too-small `Vec::with_capacity` in `as_bytes`; the subsequent
+    /// `extend_from_slice` calls inside `write_to` would still produce
+    /// a correct buffer (they grow as needed), but the capacity hint
+    /// would be wrong and reallocation cost would be incurred silently.
     #[inline]
     pub(crate) fn serialized_size(&self) -> usize {
-        12 + (self.table.len() + self.reverse_table.len()) * 4
+        let table_bytes = self
+            .table
+            .len()
+            .checked_mul(4)
+            .expect("CodeMapper::serialized_size: table size overflows usize");
+        let reverse_bytes = self
+            .reverse_table
+            .len()
+            .checked_mul(4)
+            .expect("CodeMapper::serialized_size: reverse_table size overflows usize");
+        12usize
+            .checked_add(table_bytes)
+            .and_then(|s| s.checked_add(reverse_bytes))
+            .expect("CodeMapper::serialized_size: total exceeds usize::MAX")
     }
 
     /// Writes the serialised CodeMapper directly into `buf`.
     ///
     /// This avoids the intermediate `Vec<u8>` allocation that `as_bytes()` performs.
     pub(crate) fn write_to(&self, buf: &mut Vec<u8>) {
+        // Reserve up-front so the per-element `extend_from_slice` calls
+        // never reallocate. `serialized_size()` already validates the
+        // arithmetic, so subtracting the 12-byte header gives a payload
+        // length that is guaranteed to fit. `extend_from_slice` of a
+        // 4-byte array compiles to a length check + memcpy + length
+        // update — no zero-init pass like `resize(_, 0)` would incur.
+        let payload = self.serialized_size() - 12;
+        buf.reserve(payload + 12);
+
         buf.extend_from_slice(&(self.table.len() as u32).to_le_bytes());
         buf.extend_from_slice(&(self.reverse_table.len() as u32).to_le_bytes());
         buf.extend_from_slice(&self.alphabet_size.to_le_bytes());
-        // Pre-grow then fill via `chunks_exact_mut`. `to_le_bytes` makes the
-        // byte order explicit rather than relying on in-memory representation,
-        // so the code stays correct if the LE compile-time guard is ever
-        // relaxed. `extend_from_slice` would also work but costs a bounds
-        // check per 4-byte write; this form does one reserve + one loop.
-        let base = buf.len();
-        // Checked arithmetic keeps this consistent with the sibling helpers
-        // (`serial::as_bytes`, `CodeMapper::from_bytes`) that already use
-        // `checked_*` for the 32-bit safety case. Silent wrapping here would
-        // resize the buffer short and leave the `chunks_exact_mut` loop to
-        // emit a truncated serialisation — not a memory-safety issue, but a
-        // silent corruption that would surface only at deserialisation.
-        let table_bytes_len = self
-            .table
-            .len()
-            .checked_mul(4)
-            .expect("CodeMapper::write_to: table size overflows usize");
-        let reverse_bytes_len = self
-            .reverse_table
-            .len()
-            .checked_mul(4)
-            .expect("CodeMapper::write_to: reverse_table size overflows usize");
-        let payload_bytes = table_bytes_len
-            .checked_add(reverse_bytes_len)
-            .expect("CodeMapper::write_to: payload size overflows usize");
-        let new_len = base
-            .checked_add(payload_bytes)
-            .expect("CodeMapper::write_to: serialized buffer exceeds usize::MAX");
-        buf.resize(new_len, 0);
-        let tail = &mut buf[base..];
-        let (table_bytes, reverse_bytes) = tail.split_at_mut(table_bytes_len);
-        for (chunk, &v) in table_bytes.chunks_exact_mut(4).zip(self.table.iter()) {
-            chunk.copy_from_slice(&v.to_le_bytes());
+
+        // `to_le_bytes` makes the byte order explicit rather than relying
+        // on in-memory representation, so the code stays correct if the
+        // LE compile-time guard is ever relaxed.
+        for &v in &self.table {
+            buf.extend_from_slice(&v.to_le_bytes());
         }
-        for (chunk, &v) in reverse_bytes
-            .chunks_exact_mut(4)
-            .zip(self.reverse_table.iter())
-        {
-            chunk.copy_from_slice(&v.to_le_bytes());
+        for &v in &self.reverse_table {
+            buf.extend_from_slice(&v.to_le_bytes());
         }
     }
 
