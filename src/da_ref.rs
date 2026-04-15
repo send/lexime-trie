@@ -42,10 +42,15 @@ pub struct DoubleArrayRef<'a, L: Label> {
 // `Send + Sync`; reconstructing `&[Node]` / `&[u32]` over the same
 // memory inside `view()` is equivalent to holding those shared slices,
 // which are likewise `Send + Sync`. `CodeMapper` (owned `Vec<u32>` +
-// `u32`) and `Label` implementors (`u8`, `char`) are `Send + Sync`.
-// Raw pointers lose these auto-traits by default, so we re-assert them.
-unsafe impl<'a, L: Label> Send for DoubleArrayRef<'a, L> {}
-unsafe impl<'a, L: Label> Sync for DoubleArrayRef<'a, L> {}
+// `u32`) is `Send + Sync`. Raw pointers lose these auto-traits by
+// default, so we re-assert them — but `L` also appears in the struct
+// via `PhantomData<(&'a [u8], L)>`, so we must propagate `L`'s own
+// auto-traits to avoid bypassing a downstream `!Send`/`!Sync` `Label`
+// type's contract (e.g. a `Label` containing `PhantomData<Rc<()>>`).
+// The crate's pre-blessed `Label` impls (`u8`, `char`) are
+// `Send + Sync`, so this is a no-op for typical use.
+unsafe impl<'a, L: Label + Send> Send for DoubleArrayRef<'a, L> {}
+unsafe impl<'a, L: Label + Sync> Sync for DoubleArrayRef<'a, L> {}
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// Creates a zero-copy `DoubleArrayRef` from a byte slice (v3 format only).
