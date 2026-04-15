@@ -65,9 +65,8 @@ wrapper for the zero-copy view.
   the same owning struct. Constructor is `from_backing`.
   Implements `TrieSearch<L>`. Derives `Clone` when `B: Clone`
   (re-parses from the cloned backing, since a naive derive would
-  leave the clone's view pointing into the original backing).
-  Provides `as_view()` to borrow the inner view and
-  `into_backing()` to recover the original buffer.
+  leave the clone's pointers dangling into the original's storage).
+  Provides `into_backing()` to recover the original buffer.
 - **`StableBacking` marker trait.** `unsafe trait` that promises
   the implementing type's `AsRef<[u8]>::as_ref` pointer stays
   valid across moves of `Self` and the bytes do not change

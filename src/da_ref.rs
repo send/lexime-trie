@@ -18,11 +18,11 @@ use crate::{
 /// deserialization.
 #[derive(Clone)]
 pub struct DoubleArrayRef<'a, L: Label> {
-    nodes: &'a [Node],
-    child_offsets: &'a [u32],
-    children_list: &'a [u32],
-    code_map: CodeMapper,
-    _phantom: PhantomData<L>,
+    pub(crate) nodes: &'a [Node],
+    pub(crate) child_offsets: &'a [u32],
+    pub(crate) children_list: &'a [u32],
+    pub(crate) code_map: CodeMapper,
+    pub(crate) _phantom: PhantomData<L>,
 }
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
