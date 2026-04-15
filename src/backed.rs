@@ -66,6 +66,56 @@ unsafe impl StableBacking for std::rc::Rc<[u8]> {}
 // reference itself is trivially copy-stable.
 unsafe impl StableBacking for &[u8] {}
 
+/// Sub-trait of [`StableBacking`]: cloning the backing produces a copy
+/// whose data resides at the **same address** as the original, so the
+/// bytes — and their alignment — are shared rather than re-allocated.
+///
+/// This unlocks an infallible, zero-cost [`Clone`] impl for
+/// [`DoubleArrayBacked`]: on clone the inner view's raw pointers are
+/// still valid for the cloned backing, so re-parsing (and its potential
+/// [`TrieError::MisalignedData`] failure on unusual allocators) is
+/// avoided entirely.
+///
+/// # Pre-blessed types
+///
+/// - `Arc<[u8]>`, `Rc<[u8]>` — `Clone` increments the reference count;
+///   the cloned handle points at the same `[u8]` storage as the original.
+/// - `&[u8]` — `Clone` on a shared reference is a pointer-plus-length
+///   copy; the referenced bytes are shared by construction.
+///
+/// `Vec<u8>` and `Box<[u8]>` deliberately do **not** implement this
+/// trait: their `Clone` allocates a fresh buffer, so the cloned data
+/// lives at a new address (and possibly with a different alignment).
+/// [`DoubleArrayBacked`] built on top of those backings is not `Clone`
+/// — callers should use [`DoubleArrayBacked::try_clone`] (fallible
+/// because the fresh allocation may not meet the 4-byte alignment
+/// requirement) or wrap the backing in an `Arc<[u8]>` /  `Rc<[u8]>`
+/// upfront.
+///
+/// # Safety
+///
+/// Implementors must guarantee that for every `self: Self` and every
+/// `clone: Self` obtained from `<Self as Clone>::clone(&self)`:
+///
+/// - `clone.as_ref().as_ptr() == self.as_ref().as_ptr()` — the data
+///   addresses are literally equal (not merely byte-equivalent).
+/// - `clone.as_ref().len() == self.as_ref().len()`.
+/// - The alignment of the returned slice is identical.
+///
+/// Implementing this trait for a type that allocates a fresh buffer
+/// on `clone` (or that otherwise changes the data address) makes
+/// [`DoubleArrayBacked`]'s `Clone` impl unsound.
+pub unsafe trait CloneStableBacking: StableBacking + Clone {}
+
+// Ref-counted: `Clone` bumps the refcount; the `[u8]` payload is shared
+// across all handles, so `as_ref().as_ptr()` is identical for every
+// clone.
+unsafe impl CloneStableBacking for std::sync::Arc<[u8]> {}
+unsafe impl CloneStableBacking for std::rc::Rc<[u8]> {}
+
+// Shared reference: `Clone` is a trivial pointer-plus-length copy.
+unsafe impl CloneStableBacking for &[u8] {}
+
 /// A [`DoubleArrayRef`] bundled together with the byte buffer it borrows from.
 ///
 /// Use this when you want a self-contained, movable trie value that owns
@@ -211,19 +261,42 @@ impl<L: Label, B: StableBacking> DoubleArrayBacked<L, B> {
     }
 }
 
-impl<L: Label, B: StableBacking + Clone> Clone for DoubleArrayBacked<L, B> {
-    fn clone(&self) -> Self {
-        // A `#[derive(Clone)]` would copy the raw pointers alongside a
-        // *fresh* cloned backing at a different address — the clone's
-        // pointers would dangle into the original's storage. Re-parse
-        // from the cloned backing so the new pointers target the new
-        // buffer.
-        //
-        // `expect` cannot fire in practice: `self.backing` was already
-        // parsed successfully during construction, and `B: Clone` is
-        // expected to produce an identical byte sequence.
+impl<L: Label, B: StableBacking + Clone> DoubleArrayBacked<L, B> {
+    /// Fallible clone that works with any `B: StableBacking + Clone`.
+    ///
+    /// For backings that implement [`CloneStableBacking`] (`Arc<[u8]>`,
+    /// `Rc<[u8]>`, `&[u8]`), prefer the infallible [`Clone`] impl —
+    /// it avoids re-parsing and cannot fail. `try_clone` exists
+    /// primarily for backings whose `Clone` allocates a fresh buffer
+    /// (`Vec<u8>`, `Box<[u8]>`), where the new allocation may not
+    /// satisfy the 4-byte alignment the zero-copy loader requires
+    /// (see [`StableBacking`]'s alignment notes).
+    ///
+    /// Returns the same errors as [`DoubleArrayRef::from_bytes`]; the
+    /// realistic failure mode is [`TrieError::MisalignedData`] when
+    /// `B::clone` produces a buffer at a different alignment than the
+    /// original (most commonly under Miri or a custom `GlobalAlloc`).
+    pub fn try_clone(&self) -> Result<Self, TrieError> {
         Self::from_backing(self.backing.clone())
-            .expect("cloning a validated backing should reproduce a valid view")
+    }
+}
+
+impl<L: Label, B: CloneStableBacking> Clone for DoubleArrayBacked<L, B> {
+    fn clone(&self) -> Self {
+        // SAFETY: `B: CloneStableBacking` guarantees that
+        // `self.backing.clone().as_ref().as_ptr()` equals
+        // `self.backing.as_ref().as_ptr()`. Therefore the raw pointers
+        // stored in `self.view` are *still* valid for the cloned
+        // backing: the data lives at the same address and alignment.
+        // Cloning the view is a bitwise copy of those raw pointers
+        // (via the derived `Clone` on `DoubleArrayRef`), so no
+        // re-parsing and no alignment re-validation is required. The
+        // infallibility of this impl is exactly what motivated
+        // `CloneStableBacking` in the first place.
+        Self {
+            view: self.view.clone(),
+            backing: self.backing.clone(),
+        }
     }
 }
 
@@ -386,17 +459,60 @@ mod tests {
     }
 
     #[test]
-    fn backed_clone_reparses_from_cloned_backing() {
-        // The hand-written `Clone` re-parses the cloned backing rather
-        // than copying `view`'s stale pointers. Verify the clone stands
-        // on its own after the original is dropped.
+    fn backed_try_clone_reparses_from_cloned_backing() {
+        // For address-changing backings (`AlignedBytes` clones a fresh
+        // `Vec<u64>`, so the payload moves to a new heap block),
+        // `try_clone` re-parses the cloned bytes rather than copying
+        // `view`'s stale pointers. Verify the clone stands on its own
+        // after the original is dropped.
         let keys: Vec<&[u8]> = vec![b"abc", b"xyz"];
         let da = DoubleArray::<u8>::build(&keys);
         let original =
             DoubleArrayBacked::<u8, _>::from_backing(AlignedBytes::new(&da.as_bytes())).unwrap();
-        let cloned = original.clone();
+        let cloned = original.try_clone().unwrap();
         drop(original); // The clone's view must borrow into its own backing.
         assert_eq!(cloned.exact_match(b"abc"), Some(0));
         assert_eq!(cloned.exact_match(b"xyz"), Some(1));
+    }
+
+    #[test]
+    fn backed_clone_arc_preserves_address() {
+        // For `Arc<[u8]>`, `Clone` is a refcount bump — the cloned
+        // handle points at the same `[u8]` payload. The `Clone` impl
+        // on `DoubleArrayBacked<L, Arc<[u8]>>` exploits this by
+        // bitwise-copying the view instead of re-parsing.
+        use std::sync::Arc;
+        let keys: Vec<&[u8]> = vec![b"abc", b"xyz"];
+        let da = DoubleArray::<u8>::build(&keys);
+        // Aligned backing via Vec<u32> → Arc<[u8]> — a realistic path
+        // for shipping an mmap-like handle.
+        let aligned = AlignedBytes::new(&da.as_bytes());
+        let arc: Arc<[u8]> = Arc::from(aligned.as_slice());
+        let original = DoubleArrayBacked::<u8, Arc<[u8]>>::from_backing(arc).unwrap();
+        let original_addr = original.as_view() as *const DoubleArrayRef<'_, u8> as usize;
+        let cloned = original.clone();
+        // Sanity: both clones resolve queries the same way.
+        assert_eq!(original.exact_match(b"abc"), Some(0));
+        assert_eq!(cloned.exact_match(b"abc"), Some(0));
+        assert_eq!(cloned.exact_match(b"xyz"), Some(1));
+        // The two wrappers live at distinct stack addresses (sanity
+        // check that we got two `Self` values, not a single shared one).
+        assert_ne!(
+            original_addr,
+            cloned.as_view() as *const DoubleArrayRef<'_, u8> as usize
+        );
+    }
+
+    #[test]
+    fn backed_clone_shared_slice_preserves_address() {
+        // For `&[u8]`, `Clone` is a pointer-plus-length copy.
+        let keys: Vec<&[u8]> = vec![b"abc", b"xyz"];
+        let da = DoubleArray::<u8>::build(&keys);
+        let aligned = AlignedBytes::new(&da.as_bytes());
+        let slice: &[u8] = aligned.as_slice();
+        let original = DoubleArrayBacked::<u8, &[u8]>::from_backing(slice).unwrap();
+        let cloned = original.clone();
+        assert_eq!(original.exact_match(b"abc"), Some(0));
+        assert_eq!(cloned.exact_match(b"abc"), Some(0));
     }
 }

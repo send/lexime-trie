@@ -63,10 +63,11 @@ wrapper for the zero-copy view.
   lexime to use `mem::transmute<DoubleArrayRef<'_, u8>,
   DoubleArrayRef<'static, u8>>` to keep an mmap and its view in
   the same owning struct. Constructor is `from_backing`.
-  Implements `TrieSearch<L>`. Derives `Clone` when `B: Clone`
-  (re-parses from the cloned backing, since a naive derive would
-  leave the clone's pointers dangling into the original's storage).
-  Provides `into_backing()` to recover the original buffer.
+  Implements `TrieSearch<L>`. Infallibly `Clone` when
+  `B: CloneStableBacking` (bitwise-copies the view, refcount-bumps
+  the backing); callers with a `Vec<u8>` / `Box<[u8]>` backing use
+  the fallible `try_clone()` method instead. Provides
+  `into_backing()` to recover the original buffer.
 - **`StableBacking` marker trait.** `unsafe trait` that promises
   the implementing type's `AsRef<[u8]>::as_ref` pointer stays
   valid across moves of `Self` and the bytes do not change
@@ -87,8 +88,27 @@ wrapper for the zero-copy view.
   source to reject malformed buffers before any query. Not
   invoked by either `from_bytes` constructor.
 - **`DoubleArrayRef<'a, L>` now derives `Clone`** and implements
-  a compact `Debug`. `DoubleArrayBacked<L, B>` gains the same
-  derives (hand-written to re-parse on clone).
+  a compact `Debug`. `DoubleArrayBacked<L, B>` also implements
+  both, with `Clone` gated by `CloneStableBacking` (see below).
+- **`CloneStableBacking` sub-trait.** `unsafe trait` extending
+  `StableBacking + Clone` with the additional guarantee that
+  `<B as Clone>::clone(&self).as_ref().as_ptr()` equals
+  `self.as_ref().as_ptr()` — i.e. cloning the backing does not
+  reallocate, it shares or refcounts the existing storage.
+  `DoubleArrayBacked<L, B>` implements `Clone` infallibly and
+  without re-parsing when `B: CloneStableBacking`. Pre-blessed
+  impls: `Arc<[u8]>`, `Rc<[u8]>`, `&[u8]`. For backings whose
+  `Clone` allocates a fresh buffer (`Vec<u8>`, `Box<[u8]>`), use
+  `DoubleArrayBacked::try_clone()` — which re-parses the new
+  allocation and returns `Err(TrieError::MisalignedData)` if the
+  fresh buffer fails to meet the 4-byte alignment requirement.
+- **`DoubleArrayBacked::try_clone(&self) -> Result<Self, TrieError>`.**
+  Fallible clone available for any `B: StableBacking + Clone`.
+  Re-parses from `self.backing.clone()` and is the only clone
+  path offered for `Vec<u8>` / `Box<[u8]>` backings; the realistic
+  failure mode is a `MisalignedData` when the cloned allocation
+  has different alignment than the original (primarily under Miri
+  or a custom `GlobalAlloc`).
 - **`DoubleArrayBacked::as_view() -> &DoubleArrayRef<'_, L>`.**
   Borrow the inner zero-copy view without consuming the wrapper.
   The returned reference's lifetime is tied to `&self`, so the
@@ -132,6 +152,16 @@ wrapper for the zero-copy view.
    tables, etc.), those still need their own bundling solution
    — `DoubleArrayBacked` only covers the trie view. You can
    apply the same self-referential-newtype recipe for them.
+6. If you were cloning a `DoubleArrayBacked<L, Vec<u8>>` or
+   `DoubleArrayBacked<L, Box<[u8]>>`, replace `.clone()` with
+   `.try_clone()?` or `.try_clone().expect(...)`. The infallible
+   `Clone` impl is now gated on `B: CloneStableBacking`, which
+   `Vec<u8>` / `Box<[u8]>` deliberately do not implement (their
+   `Clone` allocates a fresh buffer at a potentially different
+   alignment, so re-parsing can fail). To keep the infallible
+   `.clone()` ergonomics, wrap the buffer up-front as
+   `Arc::<[u8]>::from(buf)` or `Rc::<[u8]>::from(buf)` — both
+   are pre-blessed `CloneStableBacking`.
 
 Existing serialised buffers (v3 format, 0.3.0 and 0.3.1) load
 unchanged; the binary format itself is unchanged.

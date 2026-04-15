@@ -60,7 +60,7 @@ mod test_support;
 
 use std::marker::PhantomData;
 
-pub use backed::{DoubleArrayBacked, StableBacking};
+pub use backed::{CloneStableBacking, DoubleArrayBacked, StableBacking};
 pub use da_ref::DoubleArrayRef;
 pub use label::Label;
 pub use search::{PrefixMatch, ProbeResult, SearchMatch, TrieSearch};
