@@ -3,7 +3,10 @@ use crate::{CodeMapper, DoubleArray, Label, Node};
 /// Mutable state used during trie construction.
 struct BuildContext {
     nodes: Vec<Node>,
-    siblings: Vec<u32>,
+    /// For each slot, the list of child indices placed by `build_rec`,
+    /// in code-ascending order (terminal first if present). Flattened into
+    /// `children_list` + `child_offsets` once recursion completes.
+    children_per_parent: Vec<Vec<u32>>,
     free_list: FreeList,
 }
 
@@ -101,7 +104,7 @@ impl BuildContext {
         free_list.remove(1);
         Self {
             nodes: vec![Node::default(); capacity],
-            siblings: vec![0u32; capacity],
+            children_per_parent: vec![Vec::new(); capacity],
             free_list,
         }
     }
@@ -110,7 +113,7 @@ impl BuildContext {
     fn ensure_capacity(&mut self, new_cap: usize) {
         if new_cap > self.nodes.len() {
             self.nodes.resize(new_cap, Node::default());
-            self.siblings.resize(new_cap, 0);
+            self.children_per_parent.resize(new_cap, Vec::new());
             self.free_list.grow(new_cap);
         }
     }
@@ -126,9 +129,10 @@ impl BuildContext {
     ) {
         // Collect distinct child labels and their key ranges. Keys arrive in
         // byte-sorted order, but codes are frequency-assigned — so byte order
-        // and code order can disagree. Sibling chains are walked in code
-        // order (first_child starts at code 1), so we must also place children
-        // in code order to keep the chain consistent with that traversal.
+        // and code order can disagree. Children are placed in code-ascending
+        // order (code 0 terminal first, then extensions) so that the final
+        // `children_list[child_offsets[parent]..]` slice carries the same
+        // ordering invariant.
         let mut children: Vec<(u32, usize, usize)> = Vec::new();
         let mut i = begin;
         while i < end {
@@ -155,11 +159,9 @@ impl BuildContext {
             self.nodes[child_idx as usize].set_check(parent);
         }
 
-        // Build sibling chain
-        for w in child_indices.windows(2) {
-            self.siblings[w[0] as usize] = w[1];
-        }
-        // Last child's sibling is 0 (no more siblings)
+        // Record this parent's children for later flattening into children_list.
+        // `child_indices` is already in code-ascending order (terminal first).
+        self.children_per_parent[parent as usize] = child_indices.clone();
 
         // Set leaf/has_leaf flags and recurse into non-terminal children
         for (ci, &(code, child_begin, child_end)) in children.iter().enumerate() {
@@ -224,12 +226,11 @@ impl BuildContext {
             // Advance cursor to the next free slot
             let next = self.free_list.next[cursor as usize];
             if next == 0 {
-                // Wrapped around to sentinel — all current free slots exhausted, grow
-                let new_cap = self.nodes.len() * 2;
-                let new_first = self.free_list.grow(new_cap);
-                self.nodes.resize(new_cap, Node::default());
-                self.siblings.resize(new_cap, 0);
-                cursor = new_first;
+                // Wrapped around to sentinel — all current free slots exhausted, grow.
+                let old_cap = self.nodes.len();
+                let new_cap = old_cap * 2;
+                self.ensure_capacity(new_cap);
+                cursor = old_cap as u32;
             } else {
                 cursor = next;
             }
@@ -256,10 +257,11 @@ impl<L: Label> DoubleArray<L> {
 
         if keys.is_empty() {
             let empty: &[Vec<L>] = &[];
-            // [sentinel, empty root]
+            // [sentinel, empty root], no edges.
             return Self::new(
                 vec![Node::default(), Node::default()],
-                vec![0, 0],
+                vec![0u32, 0, 0], // child_offsets of length N+1 = 3
+                Vec::new(),
                 CodeMapper::build(empty),
             );
         }
@@ -295,9 +297,19 @@ impl<L: Label> DoubleArray<L> {
             .unwrap_or(1);
         let final_len = (last_used + 1).max(2);
         ctx.nodes.truncate(final_len);
-        ctx.siblings.truncate(final_len);
+        ctx.children_per_parent.truncate(final_len);
 
-        Self::new(ctx.nodes, ctx.siblings, code_map)
+        // Flatten children_per_parent into child_offsets (CSR offsets, len N+1)
+        // and children_list (flat, len E).
+        let mut child_offsets: Vec<u32> = Vec::with_capacity(final_len + 1);
+        let mut children_list: Vec<u32> = Vec::new();
+        child_offsets.push(0);
+        for slot_children in &ctx.children_per_parent {
+            children_list.extend_from_slice(slot_children);
+            child_offsets.push(children_list.len() as u32);
+        }
+
+        Self::new(ctx.nodes, child_offsets, children_list, code_map)
     }
 }
 
@@ -380,17 +392,18 @@ mod tests {
     }
 
     #[test]
-    fn sibling_chain_no_cycle() {
-        let keys: Vec<&[u8]> = vec![b"a", b"b", b"c"];
+    fn children_list_has_no_duplicates() {
+        // Each node index can appear as a child of at most one parent. Equivalent
+        // to the v2 "sibling chain has no cycle" check but stronger: it also
+        // verifies that the flattened children_list has no accidental duplicates.
+        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"ac", b"b", b"bc", b"c"];
         let da = DoubleArray::<u8>::build(&keys);
-
-        for i in 0..da.siblings.len() {
-            let mut visited = std::collections::HashSet::new();
-            let mut cur = i as u32;
-            while cur != 0 {
-                assert!(visited.insert(cur), "cycle detected in sibling chain");
-                cur = da.siblings[cur as usize];
-            }
+        let mut seen = std::collections::HashSet::new();
+        for &c in &da.children_list {
+            assert!(
+                seen.insert(c),
+                "child index {c} appears more than once in children_list"
+            );
         }
     }
 
@@ -436,7 +449,101 @@ mod tests {
     }
 
     #[test]
-    fn sibling_chain_links_same_parent() {
+    fn child_offsets_structural() {
+        // len == N+1, monotonic non-decreasing, starts at 0, ends at E.
+        let cases: Vec<Vec<&[u8]>> = vec![
+            vec![],
+            vec![b"a"],
+            vec![b"a", b"ab", b"abc", b"b", b"bc"],
+            vec![b"n", b"na", b"ni", b"nu", b"shi"],
+        ];
+        for keys in cases {
+            let da = DoubleArray::<u8>::build(&keys);
+            let n = da.nodes.len();
+            assert_eq!(da.child_offsets.len(), n + 1, "len == N+1 (keys={keys:?})");
+            assert_eq!(da.child_offsets[0], 0, "starts at 0 (keys={keys:?})");
+            assert_eq!(
+                da.child_offsets[n] as usize,
+                da.children_list.len(),
+                "ends at children_list.len() (keys={keys:?})"
+            );
+            for w in da.child_offsets.windows(2) {
+                assert!(w[0] <= w[1], "monotonic (keys={keys:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn child_offsets_sentinel_empty() {
+        // nodes[0] is the sentinel and has no children in any build output.
+        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
+        let da = DoubleArray::<u8>::build(&keys);
+        assert_eq!(
+            da.child_offsets[0], da.child_offsets[1],
+            "sentinel range must be empty"
+        );
+    }
+
+    #[test]
+    fn children_list_check_invariant() {
+        // Every entry in children_list[child_offsets[p]..child_offsets[p+1]]
+        // must be a node whose check() equals p.
+        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc", b"n", b"na", b"shi"];
+        let da = DoubleArray::<u8>::build(&keys);
+        for p in 0..da.nodes.len() {
+            let start = da.child_offsets[p] as usize;
+            let end = da.child_offsets[p + 1] as usize;
+            for &c in &da.children_list[start..end] {
+                assert_eq!(
+                    da.nodes[c as usize].check() as usize,
+                    p,
+                    "child {c} of parent {p} must have check()=={p}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn child_ordering_terminal_first_then_code_ascending() {
+        // For each parent with children, codes are ascending and — if the
+        // parent has_leaf — the first child is the terminal (code 0, is_leaf).
+        let keys: Vec<&[u8]> = vec![
+            b"a", b"ab", b"abc", b"abd", b"b", b"bc", b"n", b"na", b"ni", b"nu",
+        ];
+        let da = DoubleArray::<u8>::build(&keys);
+        for p in 0..da.nodes.len() {
+            let start = da.child_offsets[p] as usize;
+            let end = da.child_offsets[p + 1] as usize;
+            let children = &da.children_list[start..end];
+            if children.is_empty() {
+                continue;
+            }
+            let parent_base = da.nodes[p].base();
+            // Compute codes for each child via XOR inverse.
+            let codes: Vec<u32> = children.iter().map(|&c| parent_base ^ c).collect();
+            // Codes must be strictly ascending.
+            for w in codes.windows(2) {
+                assert!(
+                    w[0] < w[1],
+                    "parent {p} children must be code-ascending, got {:?}",
+                    codes
+                );
+            }
+            // If has_leaf is set, the first child is the terminal (code 0).
+            if da.nodes[p].has_leaf() {
+                assert_eq!(codes[0], 0, "parent {p} with has_leaf must have terminal first");
+                assert!(
+                    da.nodes[children[0] as usize].is_leaf(),
+                    "parent {p} first child must be a leaf node"
+                );
+            } else {
+                assert_ne!(codes[0], 0, "parent {p} without has_leaf must not have terminal");
+            }
+        }
+    }
+
+    #[test]
+    fn children_list_links_same_parent() {
         let da = DoubleArray::<u8>::build(&[b"ab", b"ac", b"ad"]);
 
         // Find node for 'a' from root (root is at nodes[1])
@@ -445,36 +552,21 @@ mod tests {
         let node_a_idx = root_base ^ code_a;
         assert_eq!(da.nodes[node_a_idx as usize].check(), 1);
 
-        // Count children of node_a via sibling chain
-        let a_base = da.nodes[node_a_idx as usize].base();
-
-        // Find any child of node_a to start the chain
-        let mut first_child = None;
-        for code in 0..da.code_map.alphabet_size() {
-            let idx = a_base ^ code;
-            if (idx as usize) < da.nodes.len() && da.nodes[idx as usize].check() == node_a_idx {
-                first_child = Some(idx);
-                break;
-            }
-        }
-
-        let first = first_child.expect("node_a should have children");
-        let mut count = 1;
-        let mut cur = da.siblings[first as usize];
-        while cur != 0 {
+        // Every entry in node_a's children_list slice must have check() == node_a_idx.
+        let start = da.child_offsets[node_a_idx as usize] as usize;
+        let end = da.child_offsets[node_a_idx as usize + 1] as usize;
+        let children = &da.children_list[start..end];
+        for &c in children {
             assert_eq!(
-                da.nodes[cur as usize].check(),
+                da.nodes[c as usize].check(),
                 node_a_idx,
-                "sibling should have same parent"
+                "child {c} of node_a must have check() == node_a_idx"
             );
-            count += 1;
-            cur = da.siblings[cur as usize];
         }
 
-        // "ab", "ac", "ad" share prefix "a", so node_a has children:
-        // terminal (since none of these keys IS "a"), 'b', 'c', 'd'
-        // Actually "a" is not a key, so no terminal child for node_a.
-        // Children are: code('b'), code('c'), code('d') = 3 children
+        // "ab", "ac", "ad" share prefix "a"; none of them equals "a", so node_a
+        // has no terminal child. Extensions are code('b'), code('c'), code('d').
+        let count = children.len();
         assert_eq!(count, 3);
     }
 }

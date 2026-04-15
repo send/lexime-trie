@@ -3,12 +3,13 @@ use std::marker::PhantomData;
 use crate::{CodeMapper, Label, Node, PrefixMatch, ProbeResult, SearchMatch};
 
 /// A borrowed view into a double-array trie, holding references to nodes,
-/// siblings, and the code mapper. All search methods are implemented here
-/// and shared between `DoubleArray` and `DoubleArrayRef`.
+/// the CSR children representation, and the code mapper. All search methods
+/// are implemented here and shared between `DoubleArray` and `DoubleArrayRef`.
 #[derive(Clone, Copy)]
 pub(crate) struct TrieView<'a, L: Label> {
     pub(crate) nodes: &'a [Node],
-    pub(crate) siblings: &'a [u32],
+    pub(crate) child_offsets: &'a [u32],
+    pub(crate) children_list: &'a [u32],
     pub(crate) code_map: &'a CodeMapper,
     pub(crate) _phantom: PhantomData<L>,
 }
@@ -96,37 +97,17 @@ impl<'a, L: Label> TrieView<'a, L> {
             view: self,
             stack,
             key_buf,
-            children_buf: Vec::new(),
         }
     }
 
-    /// Finds the first child of `node_idx`.
-    ///
-    /// Still uses an O(alphabet_size) scan in PR-1; superseded by the
-    /// `children_list` representation in PR-2.
+    /// Returns the slice of child indices for `node_idx`, in code-ascending
+    /// order (terminal first if present).
     #[inline]
-    fn first_child(&self, node_idx: u32) -> Option<u32> {
-        let node = self.nodes[node_idx as usize];
-        let base = node.base();
-        // Require `has_leaf` before reading the terminal slot. With the
-        // sentinel at nodes[0] and root at nodes[1], unused slots (check=0)
-        // no longer collide with the root-as-parent case, so the extra
-        // `terminal_idx != node_idx` guard is redundant.
-        let terminal_idx = base;
-        if node.has_leaf()
-            && (terminal_idx as usize) < self.nodes.len()
-            && self.nodes[terminal_idx as usize].check() == node_idx
-            && self.nodes[terminal_idx as usize].is_leaf()
-        {
-            return Some(terminal_idx);
-        }
-        for code in 1..self.code_map.alphabet_size() {
-            let idx = base ^ code;
-            if (idx as usize) < self.nodes.len() && self.nodes[idx as usize].check() == node_idx {
-                return Some(idx);
-            }
-        }
-        None
+    fn children_of(&self, node_idx: u32) -> &'a [u32] {
+        let p = node_idx as usize;
+        let start = self.child_offsets[p] as usize;
+        let end = self.child_offsets[p + 1] as usize;
+        &self.children_list[start..end]
     }
 
     /// Probe a key. Returns whether the key exists and whether it has children.
@@ -142,24 +123,25 @@ impl<'a, L: Label> TrieView<'a, L> {
             }
         };
 
-        let base = self.nodes[node_idx as usize].base();
+        let node = self.nodes[node_idx as usize];
+        let children = self.children_of(node_idx);
+        let n = children.len();
 
-        let terminal_idx = base;
-        if (terminal_idx as usize) < self.nodes.len() {
-            let terminal = self.nodes[terminal_idx as usize];
-            if terminal.check() == node_idx && terminal.is_leaf() {
-                let has_children = self.siblings[terminal_idx as usize] != 0;
+        if node.has_leaf() && n > 0 {
+            // By construction, the first child is the terminal (code 0).
+            let terminal_idx = children[0] as usize;
+            let terminal = self.nodes[terminal_idx];
+            if terminal.is_leaf() {
                 return ProbeResult {
                     value: Some(terminal.value_id()),
-                    has_children,
+                    has_children: n > 1,
                 };
             }
         }
 
-        let has_children = self.first_child(node_idx).is_some();
         ProbeResult {
             value: None,
-            has_children,
+            has_children: n > 0,
         }
     }
 }
@@ -251,15 +233,12 @@ pub(crate) struct PredictiveIter<'a, L: Label> {
     /// Shared key buffer. Grows/truncates as DFS proceeds, avoiding per-node
     /// Vec<L> clones. Only cloned when emitting a SearchMatch.
     key_buf: Vec<L>,
-    /// Reusable buffer for collecting children within a single `next()` call.
-    children_buf: Vec<(u32, bool)>,
 }
 
 impl<L: Label> Iterator for PredictiveIter<'_, L> {
     type Item = SearchMatch<L>;
 
     fn next(&mut self) -> Option<SearchMatch<L>> {
-        let node_count = self.view.nodes.len();
         while let Some((node_idx, parent_depth, label)) = self.stack.pop() {
             // Restore key_buf to the parent's depth, then append this node's label.
             self.key_buf.truncate(parent_depth as usize);
@@ -271,58 +250,30 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
             let node = &self.view.nodes[node_idx as usize];
             let base = node.base();
 
-            self.children_buf.clear();
-
-            // A node has a terminal child iff it carries the `has_leaf` flag.
-            // The bounds + leaf checks protect against malformed data where
-            // base(p) points to a slot that isn't a valid terminal; they are
-            // not needed to disambiguate root from unused slots (root now
-            // lives at nodes[1], unused slots are check=0 at nodes[0]).
-            let terminal_idx = base;
-            let has_real_terminal = node.has_leaf()
-                && (terminal_idx as usize) < node_count
-                && self.view.nodes[terminal_idx as usize].check() == node_idx
-                && self.view.nodes[terminal_idx as usize].is_leaf();
-
-            if has_real_terminal {
-                self.children_buf.push((terminal_idx, true));
-
-                let mut sib = self.view.siblings[terminal_idx as usize];
-                // Guard against cycles and out-of-range indices in malformed data
-                let mut steps = 0u32;
-                while sib != 0 && (sib as usize) < node_count && (steps as usize) < node_count {
-                    self.children_buf.push((sib, false));
-                    sib = self.view.siblings[sib as usize];
-                    steps += 1;
-                }
-            } else if let Some(first) = self.view.first_child(node_idx) {
-                self.children_buf.push((first, false));
-                let mut sib = self.view.siblings[first as usize];
-                let mut steps = 0u32;
-                while sib != 0 && (sib as usize) < node_count && (steps as usize) < node_count {
-                    self.children_buf.push((sib, false));
-                    sib = self.view.siblings[sib as usize];
-                    steps += 1;
-                }
-            }
+            // Children are stored in code-ascending order (terminal first if
+            // present). Iterate in reverse so that extensions end up on the
+            // stack in descending order and pop in ascending order, matching
+            // the documented traversal order.
+            let p = node_idx as usize;
+            let start = self.view.child_offsets[p] as usize;
+            let end = self.view.child_offsets[p + 1] as usize;
+            let children = &self.view.children_list[start..end];
 
             let mut result: Option<SearchMatch<L>> = None;
-
-            for i in (0..self.children_buf.len()).rev() {
-                let (child_idx, is_terminal) = self.children_buf[i];
-                if is_terminal {
-                    let child = &self.view.nodes[child_idx as usize];
-                    if child.is_leaf() {
-                        result = Some(SearchMatch {
-                            key: self.key_buf.clone(),
-                            value_id: child.value_id(),
-                        });
-                    }
+            for &c in children.iter().rev() {
+                let child = &self.view.nodes[c as usize];
+                if child.is_leaf() {
+                    // Terminal child — yield the current prefix as a match.
+                    result = Some(SearchMatch {
+                        key: self.key_buf.clone(),
+                        value_id: child.value_id(),
+                    });
                 } else {
-                    let child_code = base ^ child_idx;
+                    // Extension child — push onto the DFS stack.
+                    let child_code = base ^ c;
                     let label_u32 = self.view.code_map.reverse(child_code);
                     if let Ok(l) = L::try_from(label_u32) {
-                        self.stack.push((child_idx, depth, Some(l)));
+                        self.stack.push((c, depth, Some(l)));
                     }
                 }
             }

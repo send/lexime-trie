@@ -36,7 +36,8 @@ impl<L: Label> DoubleArray<L> {
     fn view(&self) -> TrieView<'_, L> {
         TrieView {
             nodes: &self.nodes,
-            siblings: &self.siblings,
+            child_offsets: &self.child_offsets,
+            children_list: &self.children_list,
             code_map: &self.code_map,
             _phantom: PhantomData,
         }

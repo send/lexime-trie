@@ -1,127 +1,93 @@
 use std::marker::PhantomData;
 use std::mem;
 
+use crate::serial::{validate_structural_invariants, HeaderV3};
 use crate::view::TrieView;
 use crate::{
     CodeMapper, DoubleArray, Label, Node, PrefixMatch, ProbeResult, SearchMatch, TrieError,
 };
 
-/// A zero-copy reference to a serialized double-array trie (v2 format).
+/// A zero-copy reference to a serialized double-array trie (v3 format).
 ///
-/// Unlike [`DoubleArray`], this type borrows the `nodes` and `siblings` data
-/// directly from an external byte buffer (e.g. an mmap region), avoiding
-/// heap allocation for those sections.
+/// Unlike [`DoubleArray`], this type borrows the `nodes`, `child_offsets`,
+/// and `children_list` sections directly from an external byte buffer (e.g.
+/// an mmap region), avoiding heap allocation for those sections.
 ///
 /// `code_map` is always heap-allocated since it is small and requires
 /// deserialization.
 pub struct DoubleArrayRef<'a, L: Label> {
     nodes: &'a [Node],
-    siblings: &'a [u32],
+    child_offsets: &'a [u32],
+    children_list: &'a [u32],
     code_map: CodeMapper,
     _phantom: PhantomData<L>,
 }
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
-    /// Creates a zero-copy `DoubleArrayRef` from a byte slice (v2 format only).
+    /// Creates a zero-copy `DoubleArrayRef` from a byte slice (v3 format only).
     ///
     /// The byte slice must:
-    /// - Use the LXTR v2 binary format (24-byte header)
+    /// - Use the LXTR v3 binary format (24-byte header)
     /// - Be aligned to at least 4 bytes (for `Node` and `u32` access)
     ///
     /// # Errors
     ///
     /// Returns [`TrieError::InvalidMagic`] if the magic bytes don't match.
-    /// Returns [`TrieError::InvalidVersion`] if the version is not v2.
+    /// Returns [`TrieError::InvalidVersion`] if the version is not v3.
     /// Returns [`TrieError::MisalignedData`] if the buffer is not properly aligned.
-    /// Returns [`TrieError::TruncatedData`] if the buffer is too short.
+    /// Returns [`TrieError::TruncatedData`] if the buffer is too short or the
+    /// CSR structural invariants are violated.
     pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError> {
-        const HEADER_SIZE: usize = crate::serial::HEADER_SIZE;
+        let header = HeaderV3::parse(bytes)?;
 
-        if bytes.len() < HEADER_SIZE {
-            return Err(TrieError::TruncatedData);
+        let nodes_ptr = bytes[header.nodes_offset()..].as_ptr();
+        let child_offsets_ptr = bytes[header.child_offsets_offset()..].as_ptr();
+        let children_list_ptr = bytes[header.children_list_offset()..].as_ptr();
+
+        // Alignment checks: all three sections cast to types with 4-byte
+        // alignment (Node is align 4, u32 is align 4). A 4-byte aligned buffer
+        // guarantees section alignment because each section offset is itself a
+        // multiple of 4.
+        if !(nodes_ptr as usize).is_multiple_of(mem::align_of::<Node>()) {
+            return Err(TrieError::MisalignedData);
         }
-
-        if &bytes[0..4] != crate::serial::MAGIC {
-            return Err(TrieError::InvalidMagic);
+        if !(child_offsets_ptr as usize).is_multiple_of(mem::align_of::<u32>()) {
+            return Err(TrieError::MisalignedData);
         }
-
-        if bytes[4] != crate::serial::VERSION {
-            return Err(TrieError::InvalidVersion);
-        }
-
-        let nodes_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-        let siblings_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-        let code_map_len = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
-
-        let expected_size = HEADER_SIZE
-            .checked_add(nodes_len)
-            .and_then(|s| s.checked_add(siblings_len))
-            .and_then(|s| s.checked_add(code_map_len))
-            .ok_or(TrieError::TruncatedData)?;
-        if bytes.len() < expected_size {
-            return Err(TrieError::TruncatedData);
-        }
-
-        // Validate nodes section
-        if !nodes_len.is_multiple_of(mem::size_of::<Node>()) {
-            return Err(TrieError::TruncatedData);
-        }
-
-        // Validate siblings section
-        if !siblings_len.is_multiple_of(mem::size_of::<u32>()) {
-            return Err(TrieError::TruncatedData);
-        }
-
-        let node_count = nodes_len / mem::size_of::<Node>();
-        let sibling_count = siblings_len / mem::size_of::<u32>();
-
-        // Search assumes nodes[0] = sentinel and nodes[1] = root, so the
-        // array must have at least 2 entries.
-        if node_count < 2 {
-            return Err(TrieError::TruncatedData);
-        }
-
-        // nodes and siblings must be parallel arrays of equal length
-        if sibling_count != node_count {
-            return Err(TrieError::TruncatedData);
-        }
-
-        let nodes_ptr = bytes[HEADER_SIZE..].as_ptr();
-        let siblings_ptr = bytes[HEADER_SIZE + nodes_len..].as_ptr();
-
-        // Check alignment only when sections are non-empty, because
-        // as_ptr() on an empty sub-slice may return a dangling pointer.
-        if node_count > 0 && !(nodes_ptr as usize).is_multiple_of(mem::align_of::<Node>()) {
+        if !(children_list_ptr as usize).is_multiple_of(mem::align_of::<u32>()) {
             return Err(TrieError::MisalignedData);
         }
 
-        if sibling_count > 0 && !(siblings_ptr as usize).is_multiple_of(mem::align_of::<u32>()) {
-            return Err(TrieError::MisalignedData);
-        }
+        let child_offsets_count = header.nodes_count + 1;
 
         // SAFETY:
-        // - `Node` is `#[repr(C)]` with two `u32` fields, size 8, align 4, no padding
-        // - We verified alignment and bounds above (skipped when count is 0,
-        //   which is safe because from_raw_parts with count 0 requires only
-        //   a non-null pointer, which sub-slice as_ptr() guarantees)
-        // - The data is valid for any bit pattern (u32 fields)
-        // - The lifetime `'a` ties the slice to the input buffer
-        // - We only support little-endian platforms (x86_64, aarch64) where the
-        //   in-memory layout matches the serialized LE format
-        let nodes = unsafe { std::slice::from_raw_parts(nodes_ptr as *const Node, node_count) };
+        // - `Node` is `#[repr(C)]` with two `u32` fields, size 8, align 4, no padding.
+        // - `u32` is size 4 align 4 with no invalid bit patterns.
+        // - We verified alignment and bounds above.
+        // - The lifetime `'a` ties the slices to the input buffer.
+        // - We only support little-endian platforms where the in-memory layout
+        //   matches the serialized LE format.
+        let nodes =
+            unsafe { std::slice::from_raw_parts(nodes_ptr as *const Node, header.nodes_count) };
+        let child_offsets = unsafe {
+            std::slice::from_raw_parts(child_offsets_ptr as *const u32, child_offsets_count)
+        };
+        let children_list = unsafe {
+            std::slice::from_raw_parts(children_list_ptr as *const u32, header.children_count)
+        };
 
-        let siblings =
-            unsafe { std::slice::from_raw_parts(siblings_ptr as *const u32, sibling_count) };
+        validate_structural_invariants(child_offsets, children_list)?;
 
         // code_map is always deserialized to heap
-        let code_map_offset = HEADER_SIZE + nodes_len + siblings_len;
-        let (code_map, _) =
-            CodeMapper::from_bytes(&bytes[code_map_offset..code_map_offset + code_map_len])
-                .ok_or(TrieError::TruncatedData)?;
+        let (code_map, _) = CodeMapper::from_bytes(
+            &bytes[header.code_map_offset()..header.code_map_offset() + header.code_map_len],
+        )
+        .ok_or(TrieError::TruncatedData)?;
 
         Ok(Self {
             nodes,
-            siblings,
+            child_offsets,
+            children_list,
             code_map,
             _phantom: PhantomData,
         })
@@ -132,7 +98,8 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
     fn view(&self) -> TrieView<'_, L> {
         TrieView {
             nodes: self.nodes,
-            siblings: self.siblings,
+            child_offsets: self.child_offsets,
+            children_list: self.children_list,
             code_map: &self.code_map,
             _phantom: PhantomData,
         }
@@ -176,7 +143,8 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
     pub fn to_owned(&self) -> DoubleArray<L> {
         DoubleArray::new(
             self.nodes.to_vec(),
-            self.siblings.to_vec(),
+            self.child_offsets.to_vec(),
+            self.children_list.to_vec(),
             self.code_map.clone(),
         )
     }
