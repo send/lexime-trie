@@ -277,8 +277,10 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
                     });
                 } else {
                     // Extension child — push onto the DFS stack. `reverse`
-                    // silently skips out-of-range / unconvertible codes,
-                    // which can only surface from a corrupted buffer.
+                    // silently skips out-of-range / unconvertible codes.
+                    // In practice this surfaces only from a corrupted buffer
+                    // or from an external `Label` impl that violates the
+                    // round-trip contract documented on the `Label` trait.
                     let child_code = base ^ c;
                     if let Some(l) = self.view.code_map.reverse::<L>(child_code) {
                         self.stack.push((c, depth, Some(l)));

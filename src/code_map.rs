@@ -141,7 +141,9 @@ impl CodeMapper {
     /// or malformed serialized data surfaces as a graceful signal at the
     /// call site instead of an OOB index panic in release builds. A failed
     /// `TryFrom<u32>` likewise yields `None`; for `u8` keys this cannot
-    /// occur, and for `char` it fires only on deliberately corrupted data.
+    /// occur, for `char` it fires only on deliberately corrupted data, and
+    /// for external `Label` impls it can also fire when the round-trip
+    /// contract documented on the `Label` trait is violated.
     #[inline]
     pub(crate) fn reverse<L: Label>(&self, code: u32) -> Option<L> {
         if code == 0 {
