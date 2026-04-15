@@ -7,8 +7,12 @@ description = "Run all tests"
 run = "cargo test"
 
 [tasks.check]
-description = "Run cargo check and clippy"
-run = ["cargo check", "cargo clippy -- -D warnings"]
+description = "Run cargo check, clippy, and rustdoc lints"
+run = [
+  "cargo check",
+  "cargo clippy -- -D warnings",
+  "RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --lib",
+]
 
 [tasks.fmt]
 description = "Format code"
