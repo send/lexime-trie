@@ -33,7 +33,7 @@ lexime-trie の `DoubleArray<u8>` で置き換えることで統一できる。
 | yada | byte-wise | 8B | なし | darts-clone Rust 移植 |
 | crawdad | char-wise | 8B | なし | vibrato (MeCab 2x 速) で採用 |
 | trie-rs | byte-wise | LOUDS | あり | 現在 lexime が使用 |
-| **lexime-trie** | **char-wise** | **8B (+4B sibling)** | **あり** | crawdad の手法 + predictive_search |
+| **lexime-trie** | **char-wise** | **8B + CSR 子配列** | **あり** | crawdad の手法 + predictive_search |
 
 crawdad ベンチマーク (ipadic-neologd, 5.5M keys):
 
@@ -45,7 +45,7 @@ crawdad ベンチマーク (ipadic-neologd, 5.5M keys):
 | メモリ | 121 MiB | 153 MiB | 20% 小さい |
 
 lexime-trie は crawdad の char-wise + CodeMapper アプローチを採用しつつ、
-crawdad にない **predictive_search** (sibling chain) と **probe** を追加する。
+crawdad にない **predictive_search** (CSR 子配列ベース) と **probe** を追加する。
 
 ## データ構造
 
@@ -68,23 +68,36 @@ pub struct Node {
 - HAS_LEAF: check の最上位ビット。立っているときターミナル子 (code 0) が存在する
 - 子ノード探索は O(1): `base XOR label` で直接インデックス計算
 
-### Sibling 配列 (並列・SoA レイアウト)
+### 子配列 (CSR レイアウト)
 
 ```rust
-siblings: Vec<u32>   // nodes と同じ長さの並列配列
+child_offsets: Vec<u32>    // 長さ N + 1
+children_list: Vec<u32>    // 長さ E (総エッジ数)
 ```
 
-- `siblings[i]` — ノード `i` と同じ親を持つ次の兄弟ノードのインデックス (0 = なし)
-- **Node 構造体に含めない** — Structure of Arrays (SoA) レイアウト
-- `common_prefix_search` / `exact_match` は `nodes` のみアクセス (**8B/node**)
-- `predictive_search` / `probe` は `nodes` + `siblings` を参照 (実効 12B/node)
+親ノード `p` に対し、その子は以下のスライスに並ぶ:
 
-| 操作 | アクセスする配列 | 実効ノードサイズ |
-|------|-----------------|----------------|
-| `exact_match` | `nodes` のみ | **8B** |
-| `common_prefix_search` | `nodes` のみ | **8B** |
-| `probe` | `nodes` + `siblings` | 12B |
-| `predictive_search` | `nodes` + `siblings` | 12B |
+```
+children_list[child_offsets[p] .. child_offsets[p+1]]
+```
+
+各親のスライス内では code 昇順に並び、ターミナル子 (code 0、存在する場合) は
+常に先頭。
+
+- **`Node` 構造体には含めない** — SoA レイアウトで hot path を軽く保つ
+- `exact_match` / `common_prefix_search` は `nodes` のみを参照し **8B/node** hot path を保持
+- `probe` は `nodes` + `child_offsets` (クエリごとに u32 を 1 ペア読むだけ)
+- `predictive_search` は 3 配列すべてを参照
+- `nodes[0]` は無効な sentinel、root は `nodes[1]`。
+  これにより「root の子」と「未使用スロット」を `check == 0` 一つで曖昧に
+  表していた従来設計の問題を構造的に解消
+
+| 操作 | アクセスする配列 |
+|------|-----------------|
+| `exact_match` | `nodes` のみ |
+| `common_prefix_search` | `nodes` のみ |
+| `probe` | `nodes` + `child_offsets` |
+| `predictive_search` | `nodes` + `child_offsets` + `children_list` |
 
 ### CodeMapper (頻度順ラベル再マッピング)
 
@@ -108,7 +121,7 @@ pub struct CodeMapper {
 - crawdad の Mapped scheme (Kanda et al. 2023) と同一手法
 - `reverse_table` は `predictive_search` でのキー復元に使用
 - `DoubleArray<u8>` (ローマ字 Trie) でも頻度順 CodeMapper を使用。
-  identity 変換より配列が密になり、`first_child()` のスキャン範囲も狭くなるため有利
+  identity 変換より配列が密になるため有利
 
 ### 値の格納 (ターミナルシンボル方式)
 
@@ -177,9 +190,10 @@ CodeMapper によりラベル空間は実効 ~4000 に圧縮されるため、
 
 ```rust
 pub struct DoubleArray<L: Label> {
-    nodes: Vec<Node>,
-    siblings: Vec<u32>,       // 並列配列 (predictive_search / probe 用)
-    code_map: CodeMapper,     // ラベル → 内部コード変換
+    nodes: Vec<Node>,           // nodes[0] = sentinel、nodes[1] = root
+    child_offsets: Vec<u32>,    // CSR オフセット、長さ nodes.len() + 1
+    children_list: Vec<u32>,    // 子ノード index のフラット配列、長さ E
+    code_map: CodeMapper,       // ラベル → 内部コード変換
     _phantom: PhantomData<L>,
 }
 ```
@@ -202,7 +216,12 @@ impl<L: Label> DoubleArray<L> {
   1. 全キーの文字頻度を集計 → CodeMapper 構築
   2. キーをリマップ済みコード列に変換 + ターミナルシンボル付与
   3. Doubly-linked free list で BASE を貪欲に配置
-  4. Sibling chain を構築
+     (index 0/1 は sentinel/root として最初から free list 外)
+  4. 各配置エッジ `(parent, child)` をフラットな edge ベクタに記録
+  5. 再帰完了後、O(N + E) の count-and-scatter で `child_offsets` +
+     `children_list` に flatten。`build_rec` が code 昇順で edge を
+     enqueue するため、scatter が連続スロットに書き込むことで
+     親内の順序が自動的に保たれる (sort 不要)
 - ビルドは辞書コンパイル時 (`dictool compile`) に 1 回だけ実行
 
 ### 検索操作
@@ -217,21 +236,22 @@ impl<L: Label> DoubleArray<L> {
     pub fn common_prefix_search<'a>(&'a self, query: &'a [L])
         -> impl Iterator<Item = PrefixMatch> + 'a;
 
-    /// 予測検索。prefix で始まる全キーを sibling chain による DFS で返す。
-    /// 辞書の predict / predict_ranked で使用。
+    /// 予測検索。prefix で始まる全キーを、各ノードの `children_list` スライスを
+    /// DFS で走査して返す。辞書の predict / predict_ranked で使用。
     pub fn predictive_search<'a>(&'a self, prefix: &'a [L])
         -> impl Iterator<Item = SearchMatch<L>> + 'a;
 
     /// ノード探査。キーを辿り、値の有無と子の有無を返す。
     /// ローマ字 Trie の lookup (None/Prefix/Exact/ExactAndPrefix) で使用。
     ///
-    /// ターミナルシンボル方式により O(1) で判定可能:
+    /// O(1) で判定:
     /// 1. キーを辿って到達失敗 → None
-    /// 2. ノード N に到達 → base(N) XOR 0 でターミナル子を確認
-    ///    - ターミナル子あり → value = Some(value_id),
-    ///      has_children = (siblings[terminal] != 0)
-    ///    - ターミナル子なし → value = None, has_children = true
-    ///      (N が存在する以上、子経由で到達するキーが必ず存在)
+    /// 2. ノード N に到達。`has_leaf(N)` が真ならターミナル子は
+    ///    `base(N) XOR 0 == base(N)` に存在。`has_children` は CSR スライスの幅
+    ///    `(child_offsets[N+1] - child_offsets[N]) > 1` で判定 (ターミナル以外に
+    ///    子があるか)
+    /// 3. `has_leaf(N)` が偽なら `value = None`、
+    ///    `has_children = (child_offsets[N+1] - child_offsets[N]) > 0`
     pub fn probe(&self, key: &[L]) -> ProbeResult;
 }
 
@@ -251,11 +271,11 @@ pub struct ProbeResult {
 }
 ```
 
-### シリアライズ (LXTR v2)
+### シリアライズ (LXTR v3)
 
 ```rust
 impl<L: Label> DoubleArray<L> {
-    /// 内部データの生バイト表現を返す (v2 フォーマット)。
+    /// 内部データの生バイト表現を返す (v3 フォーマット)。
     pub fn as_bytes(&self) -> Vec<u8>;
 
     /// 生バイト列から DoubleArray を復元する (コピー)。
@@ -263,75 +283,101 @@ impl<L: Label> DoubleArray<L> {
 }
 ```
 
-**v2 バイナリフォーマット** (24 バイトヘッダ、8 バイトアライメント):
+**v3 バイナリフォーマット** (24 バイトヘッダ、8 バイトアライメント):
 
 ```
-Offset  Size  内容
-0       4     Magic: "LXTR"
-4       1     Version: 0x02
-5       3     予約: [0, 0, 0]
-8       4     nodes_len (u32 LE, バイト数)
-12      4     siblings_len (u32 LE, バイト数)
-16      4     code_map_len (u32 LE, バイト数)
-20      4     予約: [0, 0, 0, 0]
-24      N     nodes データ (各ノード: base LE u32 + check LE u32)
-24+N    S     siblings データ (各: u32 LE)
-24+N+S  C     code_map データ
+Offset                        Size       内容
+0                             4          Magic: "LXTR"
+4                             1          Version: 0x03
+5                             3          予約: [0, 0, 0]
+8                             4          nodes_count    (u32 LE, = N)
+12                            4          children_count (u32 LE, = E)
+16                            4          code_map_len   (u32 LE, バイト数)
+20                            4          予約: [0, 0, 0, 0]
+24                            N*8        nodes (base LE u32 + check LE u32)
+24+N*8                        (N+1)*4    child_offsets (各: u32 LE)
+24+N*8+(N+1)*4                E*4        children_list (各: u32 LE)
+24+N*8+(N+1)*4+E*4            M          code_map データ
 ```
 
-- 24 バイトヘッダにより `nodes` データは 8 バイト境界から開始 (`Node`/`u32` に必要な 4 バイトアライメントを超過)
-- セクション: `nodes`, `siblings`, `code_map` の 3 つ
-- バイト列は `#[repr(C)]` の生データ (little-endian で serialize)
-- コピーロード: ~5ms。アプリ起動時 1 回のみ
-- **リトルエンディアン専用**: 本クレートは LE プラットフォームを要求する (BE では `compile_error!`)。
-  シリアライズはネイティブ LE レイアウトをそのまま書き出し、バイトスワップなしの zero-copy デシリアライズを実現
+- サイズは **count 単位**。各固定セクションの byte 長は `nodes_count` と
+  `children_count` から導出可能。v2 が検証していた「長さ不整合」系エラーを構造的に排除
+- セクション: `nodes`, `child_offsets`, `children_list`, `code_map` の 4 つ
+- 24 バイトヘッダで `nodes` は 8 バイト境界から開始。後続セクションも 4 バイト
+  以上のアライメントを満たし、`Node`/`u32` 要件を保持
+- 生データは `#[repr(C)]` (little-endian) で zero-copy デシリアライズ可能
+- **リトルエンディアン専用** (`compile_error!` で強制)
+- **v0.3 で v2 互換を破棄**。`from_bytes` / `from_bytes_ref` は version != 3 で
+  `InvalidVersion` を返す。v2 で永続化したファイルは元キーから再構築が必要
+
+#### ロード時の検証
+
+`from_bytes` / `from_bytes_ref` は O(1) のチェックのみ行う:
+
+- Magic、version、buffer サイズの算術
+- `nodes_count >= 2` (sentinel + root)
+- セクションのアライメント (zero-copy 経路のみ)
+- `child_offsets[0] == 0` と `child_offsets[N] == children_count`
+
+`child_offsets` の単調性チェックは意図的に **ロード時には行わない** — O(N) の
+コストで zero-copy を殺すため。不正な offset は UB を引き起こさない
+(Rust のスライスは常に bounds check されるので graceful panic に留まる)。
+クエリ前に厳密な検証が必要な呼び出し元は、別途 O(N) の strict validator を
+実行できる
 
 ### Zero-Copy デシリアライズ
 
 ```rust
 pub struct DoubleArrayRef<'a, L: Label> {
-    nodes: &'a [Node],       // バイトバッファから借用
-    siblings: &'a [u32],     // バイトバッファから借用
-    code_map: CodeMapper,    // 常にヒープ確保 (小さいため)
+    nodes: &'a [Node],            // バイトバッファから借用
+    child_offsets: &'a [u32],     // バイトバッファから借用
+    children_list: &'a [u32],     // バイトバッファから借用
+    code_map: CodeMapper,         // 常にヒープ確保 (小さいため)
     _phantom: PhantomData<L>,
 }
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
-    /// バイト列から zero-copy でデシリアライズ (v2 フォーマットのみ)。
+    /// バイト列から zero-copy でデシリアライズ (v3 フォーマットのみ)。
     /// バッファは 4 バイト以上のアライメントが必要 (`Node` および `u32` アクセスのため)。
     pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError>;
 
     /// 全検索メソッド: exact_match, common_prefix_search,
     /// predictive_search, probe — DoubleArray と同一の API。
 
-    /// nodes/siblings をヒープにコピーして owned な DoubleArray に変換する。
+    /// 借用セクションをヒープにコピーして owned な DoubleArray に変換する。
     pub fn to_owned(&self) -> DoubleArray<L>;
 }
 ```
 
-- `nodes` と `siblings` は `unsafe` ポインタキャストでバイトバッファから直接借用
+- `nodes`、`child_offsets`、`children_list` は `unsafe` ポインタキャストで
+  バイトバッファから直接借用
 - 安全性の根拠: `Node` が `#[repr(C)]` (8B, align 4, パディングなし)、
   実行時アライメント検証、LE ターゲット前提 (x86_64/aarch64)
 - `code_map` はシリアライズ形式からの復元が必要なため常にヒープにデシリアライズ (小さいため問題なし)
-- `from_bytes_ref` は LXTR v2 フォーマット (24 バイトアライメント済みヘッダ) が必要
+- `from_bytes_ref` は LXTR v3 フォーマット (24 バイトアライメント済みヘッダ) が必要
+- `from_bytes_ref` は最初のヘッダ parse 以降 O(1) — `nodes` / `child_offsets` /
+  `children_list` を走査しない
 - 典型的な使い方: ファイルを mmap して `from_bytes_ref` に渡す
 
 ### 検索ロジック共有 (TrieView)
 
-全検索メソッド (`traverse`, `exact_match`, `common_prefix_search`, `predictive_search`,
-`first_child`, `probe`) は `TrieView<'a, L>` に一元実装:
+全検索メソッド (`traverse`, `exact_match`, `common_prefix_search`,
+`predictive_search`, `probe`) は `TrieView<'a, L>` に一元実装:
 
 ```rust
 #[derive(Clone, Copy)]
 pub(crate) struct TrieView<'a, L: Label> {
     nodes: &'a [Node],
-    siblings: &'a [u32],
+    child_offsets: &'a [u32],
+    children_list: &'a [u32],
     code_map: &'a CodeMapper,
     _phantom: PhantomData<L>,
 }
 ```
 
 `DoubleArray` と `DoubleArrayRef` の両方が `TrieView` に委譲し、コード重複ゼロを実現。
+列挙系 (`predictive_search`) は CSR の子スライスを直接 iterate し、
+旧 `first_child()` 実装の O(alphabet_size) スキャンを排除。
 
 ### エラー型
 
@@ -350,23 +396,24 @@ pub enum TrieError {
 
 ## lexime との統合
 
-### 辞書ファイルフォーマット (LXDX v2)
+### 辞書ファイルフォーマット (LXDX、LXTR v3 セクション使用)
+
+lexime の辞書ファイルは LXTR v3 の trie に lexime 固有のエントリテーブルを
+続ける形。LXDX のバージョンは lexime リポジトリで別途管理される。
+以下は v3 の trie セクション部分:
 
 ```
-Offset      Size  内容
-──────────  ────  ──────────────────────────
-0           4     magic: "LXDX"
-4           1     version: 2
-5           4     nodes_len: u32
-9           4     siblings_len: u32
-13          4     code_map_len: u32
-17          4     offsets_len: u32
-21          4     entries_len: u32
-25          N     [Node; K]              ← lexime-trie: base+check
-25+N        S     [u32; K]               ← lexime-trie: siblings
-25+N+S      C     CodeMapper             ← lexime-trie: ラベル変換テーブル
-25+N+S+C    O     [u32; V+1]             ← オフセットテーブル
-25+N+S+C+O  E     [FlatDictEntry; M]     ← lexime: エントリ本体
+セクション               内容
+────────────────────   ──────────────────────────
+magic                  "LXDX" (4 bytes)
+version                辞書フォーマットバージョン
+...                    辞書固有のカウンタ
+nodes                  [Node; N]             ← lexime-trie: base+check
+child_offsets          [u32; N+1]            ← lexime-trie: CSR オフセット
+children_list          [u32; E]              ← lexime-trie: CSR 子配列
+code_map               CodeMapper            ← lexime-trie: ラベル変換
+offsets                [u32; V+1]            ← lexime: value_id → entry 範囲
+entries                [FlatDictEntry; M]    ← lexime: エントリ本体
 ```
 
 - `FlatDictEntry`: `DictEntry` から `String` を排除したフラット表現
@@ -421,10 +468,10 @@ lexime/
 │       ├── label.rs       Label trait + u8/char impl
 │       ├── node.rs        Node (base + check, 8B)
 │       ├── code_map.rs    CodeMapper (頻度順ラベル再マッピング)
-│       ├── build.rs       DoubleArray::build() + sibling chain 構築
+│       ├── build.rs       DoubleArray::build() + CSR flatten
 │       ├── search.rs      検索メソッドの TrieView 委譲
-│       ├── serial.rs      as_bytes, from_bytes
-│       ├── view.rs        TrieView — 共有検索ロジック (exact_match, common_prefix_search 等)
+│       ├── serial.rs      as_bytes, from_bytes, HeaderV3, validate_cheap
+│       ├── view.rs        TrieView — 共有検索ロジック
 │       └── da_ref.rs      DoubleArrayRef — zero-copy デシリアライズ
 ├── engine/                ← 既存クレート (lexime-trie に依存)
 │   └── Cargo.toml         trie-rs, serde, bincode を削除 → lexime-trie を追加
@@ -439,11 +486,33 @@ lexime/
 ## 実装状況
 
 1. **Node + Label + CodeMapper** — 基本型の定義とラベル再マッピング ✅
-2. **build** — ソート済みキーから Double-Array を構築 (free list + sibling chain) ✅
+2. **build** — ソート済みキーから Double-Array を構築 (free list + CSR flatten) ✅
 3. **exact_match** — 最も単純な検索 ✅
 4. **common_prefix_search** — ラティス構築に必要 ✅
-5. **predictive_search** — 予測候補に必要 (sibling chain 利用) ✅
+5. **predictive_search** — 予測候補に必要 (`children_list` 使用) ✅
 6. **probe** — ローマ字 Trie に必要 ✅
-7. **as_bytes / from_bytes** — シリアライズ (LXTR v2 フォーマット) ✅
+7. **as_bytes / from_bytes** — シリアライズ (LXTR v3 フォーマット) ✅
 8. **DoubleArrayRef / from_bytes_ref** — zero-copy mmap デシリアライズ ✅
-9. **lexime 統合** — TrieDictionary と RomajiTrie の内部を差し替え
+9. **v3 移行** — v2 破棄、root を `nodes[1]` に移動、siblings を CSR に置換 ✅
+10. **lexime 統合** — TrieDictionary と RomajiTrie の内部を差し替え
+
+## 移行ノート
+
+### v0.2 → v0.3
+
+v3 は **破壊的変更**。永続化された v2 ファイルは `TrieError::InvalidVersion` で
+拒否される。元のキー集合から再ビルドが必要。
+
+動機:
+
+- `siblings: Vec<u32>` は、子の配置順と検索時の `first_child()` の
+  発見順が一致することを暗黙の前提にしていた。両者のドリフトが
+  `predictive_search` から静かにキーを脱落させる原因になっていた
+  (#21 の regression 参照)
+- `siblings` を `child_offsets` + `children_list` に置換することで
+  順序が暗黙の emergent property ではなく格納された property になり、
+  同種のバグを構造的に排除
+- root を `nodes[1]` に移すことで `check == 0` が「未使用スロット」の
+  一意な意味を持ち、search path の多段防衛コードを整理
+- `first_child()` の alphabet スキャン除去により、50k ひらがな
+  ベンチで `predictive_search` が約 47% 高速化

@@ -90,20 +90,36 @@ impl std::error::Error for TrieError {}
 
 /// A double-array trie supporting exact match, common prefix search,
 /// predictive search, and probe operations.
+///
+/// ## Internal layout (v3)
+///
+/// - `nodes[0]` is an invalid sentinel, `nodes[1]` is the root.
+/// - For any parent `p`, its children are found at
+///   `children_list[child_offsets[p]..child_offsets[p+1]]`. Children appear in
+///   code-ascending order (so the terminal child, if any, is first).
 #[derive(Clone, Debug)]
 pub struct DoubleArray<L: Label> {
     pub(crate) nodes: Vec<Node>,
-    pub(crate) siblings: Vec<u32>,
+    /// CSR-style offsets into `children_list`, length `nodes.len() + 1`.
+    pub(crate) child_offsets: Vec<u32>,
+    /// Flat list of child indices, grouped by parent in node-index order.
+    pub(crate) children_list: Vec<u32>,
     pub(crate) code_map: CodeMapper,
     _phantom: PhantomData<L>,
 }
 
 impl<L: Label> DoubleArray<L> {
     /// Creates a new DoubleArray with the given components.
-    pub(crate) fn new(nodes: Vec<Node>, siblings: Vec<u32>, code_map: CodeMapper) -> Self {
+    pub(crate) fn new(
+        nodes: Vec<Node>,
+        child_offsets: Vec<u32>,
+        children_list: Vec<u32>,
+        code_map: CodeMapper,
+    ) -> Self {
         Self {
             nodes,
-            siblings,
+            child_offsets,
+            children_list,
             code_map,
             _phantom: PhantomData,
         }
