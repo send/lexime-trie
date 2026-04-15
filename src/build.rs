@@ -553,13 +553,19 @@ mod tests {
             }
             // If has_leaf is set, the first child is the terminal (code 0).
             if da.nodes[p].has_leaf() {
-                assert_eq!(codes[0], 0, "parent {p} with has_leaf must have terminal first");
+                assert_eq!(
+                    codes[0], 0,
+                    "parent {p} with has_leaf must have terminal first"
+                );
                 assert!(
                     da.nodes[children[0] as usize].is_leaf(),
                     "parent {p} first child must be a leaf node"
                 );
             } else {
-                assert_ne!(codes[0], 0, "parent {p} without has_leaf must not have terminal");
+                assert_ne!(
+                    codes[0], 0,
+                    "parent {p} without has_leaf must not have terminal"
+                );
             }
         }
     }

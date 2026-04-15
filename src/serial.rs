@@ -55,9 +55,7 @@ impl HeaderV3 {
         let nodes_bytes = nodes_count
             .checked_mul(std::mem::size_of::<Node>())
             .ok_or(TrieError::TruncatedData)?;
-        let child_offsets_count = nodes_count
-            .checked_add(1)
-            .ok_or(TrieError::TruncatedData)?;
+        let child_offsets_count = nodes_count.checked_add(1).ok_or(TrieError::TruncatedData)?;
         let child_offsets_bytes = child_offsets_count
             .checked_mul(4)
             .ok_or(TrieError::TruncatedData)?;
