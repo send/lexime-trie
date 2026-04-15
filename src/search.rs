@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::view::TrieView;
-use crate::{DoubleArray, Label};
+use crate::{DoubleArray, Label, TrieError};
 
 /// Result of a common prefix search match.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,10 +30,79 @@ pub struct ProbeResult {
     pub has_children: bool,
 }
 
+/// Search and introspection operations shared by [`DoubleArray`] (owned)
+/// and [`DoubleArrayRef`](crate::DoubleArrayRef) (zero-copy borrowed).
+///
+/// Users should bring this trait into scope to call `exact_match`,
+/// `common_prefix_search`, `predictive_search`, or `probe` on either
+/// trie representation:
+///
+/// ```
+/// use lexime_trie::{DoubleArray, TrieSearch};
+///
+/// let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
+/// let da = DoubleArray::<u8>::build(&keys);
+/// assert_eq!(da.exact_match(b"abc"), Some(2));
+/// ```
+///
+/// A generic function can then work over either representation:
+///
+/// ```
+/// use lexime_trie::{DoubleArray, TrieSearch};
+///
+/// fn count_hits<T: TrieSearch<u8>>(trie: &T, needles: &[&[u8]]) -> usize {
+///     needles.iter().filter(|k| trie.exact_match(k).is_some()).count()
+/// }
+///
+/// let da = DoubleArray::<u8>::build(&[b"abc".as_slice(), b"abd"]);
+/// assert_eq!(count_hits(&da, &[b"abc", b"xyz"]), 1);
+/// ```
+pub trait TrieSearch<L: Label> {
+    /// Returns the number of node slots in the trie's underlying array.
+    /// See [`DoubleArray::node_slot_count`] for exact semantics.
+    fn node_slot_count(&self) -> usize;
+
+    /// Exact match search. Returns the `value_id` assigned at build time
+    /// (i.e. the position in the original key slice) if the key exists,
+    /// `None` otherwise.
+    fn exact_match(&self, key: &[L]) -> Option<u32>;
+
+    /// Common prefix search: returns every prefix of `query` that exists
+    /// as a key in the trie, in prefix-length ascending order.
+    fn common_prefix_search<'a>(&'a self, query: &'a [L])
+        -> impl Iterator<Item = PrefixMatch> + 'a;
+
+    /// Predictive search: returns every key starting with `prefix`.
+    /// Keys are reconstructed from the trie structure via the CSR
+    /// children list; order is code-ascending per node (terminal first).
+    fn predictive_search<'a>(
+        &'a self,
+        prefix: &'a [L],
+    ) -> impl Iterator<Item = SearchMatch<L>> + 'a;
+
+    /// Probe a key for its existence and whether it is a prefix of other
+    /// stored keys. The four possible states of [`ProbeResult`]:
+    /// - `value=None, has_children=false`: key not in trie, not a prefix
+    /// - `value=None, has_children=true`: prefix-only
+    /// - `value=Some, has_children=false`: exact match, no extension
+    /// - `value=Some, has_children=true`: exact match and prefix
+    fn probe(&self, key: &[L]) -> ProbeResult;
+
+    /// Full O(N) structural validation. Runs the cheap checks already
+    /// performed by `from_bytes` / `from_bytes_ref` (section lengths
+    /// and end offset) plus monotonicity of `child_offsets`, which
+    /// the zero-copy load path skips. Call this after loading a trie
+    /// from an untrusted source to reject malformed inputs before
+    /// issuing any queries; corrupted offsets cannot cause UB (Rust
+    /// slice indexing is bounds-checked) but can produce wrong
+    /// results at query time.
+    fn validate_strict(&self) -> Result<(), TrieError>;
+}
+
 impl<L: Label> DoubleArray<L> {
     /// Returns a `TrieView` borrowing this trie's data.
     #[inline]
-    fn view(&self) -> TrieView<'_, L> {
+    pub(crate) fn view(&self) -> TrieView<'_, L> {
         TrieView {
             nodes: &self.nodes,
             child_offsets: &self.child_offsets,
@@ -42,43 +111,40 @@ impl<L: Label> DoubleArray<L> {
             _phantom: PhantomData,
         }
     }
+}
 
-    /// Exact match search. Returns the value_id if the key exists.
+impl<L: Label> TrieSearch<L> for DoubleArray<L> {
     #[inline]
-    pub fn exact_match(&self, key: &[L]) -> Option<u32> {
+    fn node_slot_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    #[inline]
+    fn exact_match(&self, key: &[L]) -> Option<u32> {
         self.view().exact_match(key)
     }
 
-    /// Common prefix search. Returns an iterator over all prefixes of `query`
-    /// that exist as keys in the trie.
-    pub fn common_prefix_search<'a>(
+    fn common_prefix_search<'a>(
         &'a self,
         query: &'a [L],
     ) -> impl Iterator<Item = PrefixMatch> + 'a {
         self.view().common_prefix_search(query)
     }
 
-    /// Predictive search. Returns an iterator over all keys that start with `prefix`.
-    ///
-    /// Uses sibling chain DFS to enumerate all keys sharing the given prefix.
-    /// Keys are reconstructed using `CodeMapper::reverse`.
-    pub fn predictive_search<'a>(
+    fn predictive_search<'a>(
         &'a self,
         prefix: &'a [L],
     ) -> impl Iterator<Item = SearchMatch<L>> + 'a {
         self.view().predictive_search(prefix)
     }
 
-    /// Probe a key. Returns whether the key exists and whether it has children.
-    ///
-    /// The 4 possible states:
-    /// - `None`: key not in trie, not a prefix of any key
-    /// - `Prefix`: key is a prefix of other keys but not a key itself
-    /// - `Exact`: key exists but is not a prefix of other keys
-    /// - `ExactAndPrefix`: key exists and is also a prefix of other keys
     #[inline]
-    pub fn probe(&self, key: &[L]) -> ProbeResult {
+    fn probe(&self, key: &[L]) -> ProbeResult {
         self.view().probe(key)
+    }
+
+    fn validate_strict(&self) -> Result<(), TrieError> {
+        crate::serial::validate_strict(&self.nodes, &self.child_offsets, &self.children_list)
     }
 }
 
@@ -502,5 +568,12 @@ mod tests {
                 has_children: false,
             }
         );
+    }
+
+    #[test]
+    fn validate_strict_on_built_trie_passes() {
+        let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b"];
+        let da = build_u8(&keys);
+        assert!(da.validate_strict().is_ok());
     }
 }

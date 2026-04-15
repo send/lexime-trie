@@ -5,6 +5,7 @@ use crate::serial::{validate_cheap, HeaderV3};
 use crate::view::TrieView;
 use crate::{
     CodeMapper, DoubleArray, Label, Node, PrefixMatch, ProbeResult, SearchMatch, TrieError,
+    TrieSearch,
 };
 
 /// A zero-copy reference to a serialized double-array trie (v3 format).
@@ -105,42 +106,6 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
         }
     }
 
-    /// Returns the number of node slots in the trie's underlying array.
-    ///
-    /// See [`DoubleArray::node_slot_count`] for semantics.
-    pub fn node_slot_count(&self) -> usize {
-        self.nodes.len()
-    }
-
-    /// Exact match search. Returns the value_id if the key exists.
-    #[inline]
-    pub fn exact_match(&self, key: &[L]) -> Option<u32> {
-        self.view().exact_match(key)
-    }
-
-    /// Common prefix search. Returns an iterator over all prefixes of `query`
-    /// that exist as keys in the trie.
-    pub fn common_prefix_search<'b>(
-        &'b self,
-        query: &'b [L],
-    ) -> impl Iterator<Item = PrefixMatch> + 'b {
-        self.view().common_prefix_search(query)
-    }
-
-    /// Predictive search. Returns an iterator over all keys that start with `prefix`.
-    pub fn predictive_search<'b>(
-        &'b self,
-        prefix: &'b [L],
-    ) -> impl Iterator<Item = SearchMatch<L>> + 'b {
-        self.view().predictive_search(prefix)
-    }
-
-    /// Probe a key. Returns whether the key exists and whether it has children.
-    #[inline]
-    pub fn probe(&self, key: &[L]) -> ProbeResult {
-        self.view().probe(key)
-    }
-
     /// Converts this zero-copy reference to an owned [`DoubleArray`].
     pub fn to_owned(&self) -> DoubleArray<L> {
         DoubleArray::new(
@@ -149,6 +114,41 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
             self.children_list.to_vec(),
             self.code_map.clone(),
         )
+    }
+}
+
+impl<'a, L: Label> TrieSearch<L> for DoubleArrayRef<'a, L> {
+    #[inline]
+    fn node_slot_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    #[inline]
+    fn exact_match(&self, key: &[L]) -> Option<u32> {
+        self.view().exact_match(key)
+    }
+
+    fn common_prefix_search<'b>(
+        &'b self,
+        query: &'b [L],
+    ) -> impl Iterator<Item = PrefixMatch> + 'b {
+        self.view().common_prefix_search(query)
+    }
+
+    fn predictive_search<'b>(
+        &'b self,
+        prefix: &'b [L],
+    ) -> impl Iterator<Item = SearchMatch<L>> + 'b {
+        self.view().predictive_search(prefix)
+    }
+
+    #[inline]
+    fn probe(&self, key: &[L]) -> ProbeResult {
+        self.view().probe(key)
+    }
+
+    fn validate_strict(&self) -> Result<(), TrieError> {
+        crate::serial::validate_strict(self.nodes, self.child_offsets, self.children_list)
     }
 }
 

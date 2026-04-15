@@ -259,10 +259,11 @@ pub(crate) fn validate_cheap(
 
 /// Full O(N) validation: cheap checks + monotonicity of `child_offsets`.
 ///
-/// Not invoked by `from_bytes` / `from_bytes_ref`. Currently used only by
-/// tests; a public wrapper on `DoubleArray` / `DoubleArrayRef` can be added
-/// later if callers need to reject malformed input before any query.
-#[cfg(test)]
+/// Not invoked by `from_bytes` / `from_bytes_ref`. Exposed to callers via
+/// `TrieSearch::validate_strict` so they can opt into hard guarantees —
+/// useful when loading trie bytes from an untrusted source where a wrapped
+/// zero-copy slice with non-monotonic offsets could otherwise produce
+/// wrong results (not UB) at query time.
 pub(crate) fn validate_strict(
     nodes: &[Node],
     child_offsets: &[u32],
@@ -309,7 +310,7 @@ fn deserialize_u32_slice(bytes: &[u8]) -> Option<Vec<u32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DoubleArray;
+    use crate::{DoubleArray, TrieSearch};
 
     #[test]
     fn round_trip_empty() {

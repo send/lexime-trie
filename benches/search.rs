@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use lexime_trie::{DoubleArray, DoubleArrayRef};
+use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};
 
 // ── Hand-rolled LCG (no external deps) ──────────────────────────────────────
 

@@ -9,7 +9,7 @@
 //! # Quick start
 //!
 //! ```
-//! use lexime_trie::DoubleArray;
+//! use lexime_trie::{DoubleArray, TrieSearch};
 //!
 //! let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc", b"b", b"bc"];
 //! let da = DoubleArray::<u8>::build(&keys);
@@ -22,7 +22,7 @@
 //! `mmap` or page-aligned allocations satisfy this requirement.
 //!
 //! ```
-//! use lexime_trie::{DoubleArray, DoubleArrayRef};
+//! use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};
 //!
 //! let keys: Vec<&[u8]> = vec![b"a", b"ab", b"abc"];
 //! let da = DoubleArray::<u8>::build(&keys);
@@ -45,6 +45,7 @@
 #[cfg(not(target_endian = "little"))]
 compile_error!("lexime-trie requires a little-endian platform");
 
+mod backed;
 mod build;
 mod code_map;
 mod da_ref;
@@ -56,9 +57,10 @@ mod view;
 
 use std::marker::PhantomData;
 
+pub use backed::DoubleArrayBacked;
 pub use da_ref::DoubleArrayRef;
 pub use label::Label;
-pub use search::{PrefixMatch, ProbeResult, SearchMatch};
+pub use search::{PrefixMatch, ProbeResult, SearchMatch, TrieSearch};
 
 use code_map::CodeMapper;
 use node::Node;
