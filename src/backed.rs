@@ -72,12 +72,50 @@ unsafe impl StableBacking for &[u8] {}
 /// its backing storage — without propagating a lifetime parameter through
 /// every call site. A typical owned-buffer construction:
 ///
-/// ```
+/// ```no_run
 /// use lexime_trie::{DoubleArray, DoubleArrayBacked, TrieSearch};
 ///
 /// let keys: Vec<&[u8]> = vec![b"hello", b"world"];
 /// let bytes: Vec<u8> = DoubleArray::<u8>::build(&keys).as_bytes();
 /// let trie: DoubleArrayBacked<u8, Vec<u8>> =
+///     DoubleArrayBacked::from_backing(bytes)?;
+/// assert_eq!(trie.exact_match(b"hello"), Some(0));
+/// # Ok::<(), lexime_trie::TrieError>(())
+/// ```
+///
+/// The example is `no_run` because `Vec<u8>` only inherits the global
+/// allocator's alignment guarantee (≥ 8 bytes on every supported system
+/// allocator, comfortably covering the 4-byte requirement of the
+/// zero-copy loader). Miri's allocator deliberately weakens that to
+/// 1 byte, so running this snippet under `cargo miri test --doc` would
+/// trip [`TrieError::MisalignedData`]. In production with a system
+/// allocator, the snippet works as written.
+///
+/// For a runnable variant — and for buffers that genuinely lack the
+/// 4-byte guarantee (custom `GlobalAlloc`, slices carved from larger
+/// regions, etc.) — borrow into a 4-byte aligned scratch buffer:
+///
+/// ```
+/// use lexime_trie::{DoubleArray, DoubleArrayBacked, TrieSearch};
+///
+/// let raw = DoubleArray::<u8>::build(&[b"hello".as_slice(), b"world"]).as_bytes();
+/// // `Vec<u32>` heap blocks are 4-byte aligned by construction.
+/// let mut aligned = vec![0u32; raw.len().div_ceil(4)];
+/// // SAFETY: `aligned` holds at least `raw.len()` bytes; `u32` has no
+/// // invalid bit patterns; the source and destination do not overlap.
+/// unsafe {
+///     std::ptr::copy_nonoverlapping(
+///         raw.as_ptr(),
+///         aligned.as_mut_ptr() as *mut u8,
+///         raw.len(),
+///     );
+/// }
+/// // SAFETY: `aligned.as_ptr()` is 4-byte aligned and points to
+/// // `raw.len()` initialized bytes (we just wrote them).
+/// let bytes: &[u8] = unsafe {
+///     std::slice::from_raw_parts(aligned.as_ptr() as *const u8, raw.len())
+/// };
+/// let trie: DoubleArrayBacked<u8, &[u8]> =
 ///     DoubleArrayBacked::from_backing(bytes)?;
 /// assert_eq!(trie.exact_match(b"hello"), Some(0));
 /// # Ok::<(), lexime_trie::TrieError>(())
@@ -142,7 +180,7 @@ impl<L: Label, B: StableBacking> DoubleArrayBacked<L, B> {
     /// Use this to pass the borrowed view to a function that accepts
     /// `&DoubleArrayRef<'_, L>`:
     ///
-    /// ```
+    /// ```no_run
     /// use lexime_trie::{DoubleArray, DoubleArrayBacked, DoubleArrayRef, Label, TrieSearch};
     ///
     /// fn lookup<L: Label>(view: &DoubleArrayRef<'_, L>, key: &[L]) -> Option<u32> {
@@ -155,6 +193,9 @@ impl<L: Label, B: StableBacking> DoubleArrayBacked<L, B> {
     /// assert_eq!(lookup(trie.as_view(), b"hi"), Some(0));
     /// # Ok::<(), lexime_trie::TrieError>(())
     /// ```
+    ///
+    /// `no_run` for the alignment reason described on
+    /// [`DoubleArrayBacked`]'s type-level docs.
     #[inline]
     pub fn as_view(&self) -> &DoubleArrayRef<'_, L> {
         &self.view

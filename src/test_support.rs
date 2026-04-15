@@ -14,7 +14,7 @@
 ///
 /// Implements both `as_slice(&self) -> &[u8]` (for call sites that want
 /// an explicit method) and `AsRef<[u8]>` (for APIs that take
-/// `impl AsRef<[u8]>`, such as `DoubleArrayBacked::new`).
+/// `impl AsRef<[u8]>`, such as `DoubleArrayBacked::from_backing`).
 #[derive(Clone)]
 pub(crate) struct AlignedBytes {
     buf: Vec<u64>,

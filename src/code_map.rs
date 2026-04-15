@@ -133,7 +133,9 @@ impl CodeMapper {
 
     /// Returns the label for a code, or `None` if the code is out of range
     /// or the stored u32 fails to round-trip back to `L`. Code 0 is the
-    /// terminal symbol and is never a valid label.
+    /// terminal symbol and is never a valid label, so it always yields
+    /// `None` — corrupted data that emits code 0 in a child position is
+    /// skipped rather than decoded as `\0`.
     ///
     /// Out-of-range codes return `None` rather than panicking so corrupted
     /// or malformed serialized data surfaces as a graceful signal at the
@@ -142,6 +144,9 @@ impl CodeMapper {
     /// occur, and for `char` it fires only on deliberately corrupted data.
     #[inline]
     pub(crate) fn reverse<L: Label>(&self, code: u32) -> Option<L> {
+        if code == 0 {
+            return None;
+        }
         let raw = self.reverse_table.get(code as usize).copied()?;
         L::try_from(raw).ok()
     }
@@ -308,6 +313,17 @@ mod tests {
         // alphabet_size = 3 (terminal + 'a' + 'b'), so code 3+ is out of range
         assert_eq!(cm.reverse::<u8>(3), None);
         assert_eq!(cm.reverse::<u8>(u32::MAX), None);
+    }
+
+    #[test]
+    fn reverse_terminal_code_is_none() {
+        // Code 0 is the terminal symbol and must never decode back to a
+        // label, even though `reverse_table[0]` is in-bounds and would
+        // round-trip through `u8::try_from(0) == Ok(0)`.
+        let keys: Vec<Vec<u8>> = vec![vec![b'a', b'b']];
+        let cm = CodeMapper::build(&keys);
+        assert_eq!(cm.reverse::<u8>(0), None);
+        assert_eq!(cm.reverse::<char>(0), None);
     }
 
     #[test]
