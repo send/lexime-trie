@@ -164,10 +164,31 @@ impl CodeMapper {
         // relaxed. `extend_from_slice` would also work but costs a bounds
         // check per 4-byte write; this form does one reserve + one loop.
         let base = buf.len();
-        let payload_bytes = (self.table.len() + self.reverse_table.len()) * 4;
-        buf.resize(base + payload_bytes, 0);
+        // Checked arithmetic keeps this consistent with the sibling helpers
+        // (`serial::as_bytes`, `CodeMapper::from_bytes`) that already use
+        // `checked_*` for the 32-bit safety case. Silent wrapping here would
+        // resize the buffer short and leave the `chunks_exact_mut` loop to
+        // emit a truncated serialisation — not a memory-safety issue, but a
+        // silent corruption that would surface only at deserialisation.
+        let table_bytes_len = self
+            .table
+            .len()
+            .checked_mul(4)
+            .expect("CodeMapper::write_to: table size overflows usize");
+        let reverse_bytes_len = self
+            .reverse_table
+            .len()
+            .checked_mul(4)
+            .expect("CodeMapper::write_to: reverse_table size overflows usize");
+        let payload_bytes = table_bytes_len
+            .checked_add(reverse_bytes_len)
+            .expect("CodeMapper::write_to: payload size overflows usize");
+        let new_len = base
+            .checked_add(payload_bytes)
+            .expect("CodeMapper::write_to: serialized buffer exceeds usize::MAX");
+        buf.resize(new_len, 0);
         let tail = &mut buf[base..];
-        let (table_bytes, reverse_bytes) = tail.split_at_mut(self.table.len() * 4);
+        let (table_bytes, reverse_bytes) = tail.split_at_mut(table_bytes_len);
         for (chunk, &v) in table_bytes.chunks_exact_mut(4).zip(self.table.iter()) {
             chunk.copy_from_slice(&v.to_le_bytes());
         }

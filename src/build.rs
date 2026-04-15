@@ -123,10 +123,11 @@ impl BuildContext {
             nodes: vec![Node::default(); capacity],
             edges: Vec::new(),
             free_list,
-            // Root lives at index 1; it's always "used" even if it has no
-            // children (e.g. a single empty key would leave root with
-            // has_leaf set but no placed children — though the `keys.is_empty()`
-            // early-return in `build` means we currently never hit that path).
+            // Root lives at index 1, so it is always considered "used"
+            // even before any descendants are placed. Every non-empty
+            // `build()` invocation places at least one terminal child
+            // (the single-empty-key case still encodes as `[terminal]`),
+            // which will bump this further.
             max_used_idx: 1,
         }
     }
