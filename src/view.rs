@@ -270,9 +270,10 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
                 } else {
                     // Extension child — push onto the DFS stack.
                     let child_code = base ^ c;
-                    let label_u32 = self.view.code_map.reverse(child_code);
-                    if let Ok(l) = L::try_from(label_u32) {
-                        self.stack.push((c, depth, Some(l)));
+                    if let Some(label_u32) = self.view.code_map.reverse(child_code) {
+                        if let Ok(l) = L::try_from(label_u32) {
+                            self.stack.push((c, depth, Some(l)));
+                        }
                     }
                 }
             }

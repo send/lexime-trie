@@ -209,15 +209,17 @@ impl<L: Label> DoubleArray<L> {
         )
         .ok_or(TrieError::TruncatedData)?;
 
-        validate_cheap(&child_offsets, &children_list)?;
+        validate_cheap(&nodes, &child_offsets, &children_list)?;
 
         Ok(Self::new(nodes, child_offsets, children_list, code_map))
     }
 }
 
-/// O(1) sanity checks on `child_offsets` + `children_list` run at load time.
+/// O(1) sanity checks on `nodes` + `child_offsets` + `children_list` run at
+/// load time.
 ///
-/// Only the endpoints are verified:
+/// Verified invariants:
+/// - `child_offsets.len() == nodes.len() + 1`
 /// - `child_offsets[0] == 0`
 /// - `child_offsets[N] == children_list.len()`
 ///
@@ -228,9 +230,13 @@ impl<L: Label> DoubleArray<L> {
 /// query, never as memory unsafety). Callers that need hard guarantees can
 /// run [`validate_strict`] explicitly.
 pub(crate) fn validate_cheap(
+    nodes: &[Node],
     child_offsets: &[u32],
     children_list: &[u32],
 ) -> Result<(), TrieError> {
+    if child_offsets.len() != nodes.len() + 1 {
+        return Err(TrieError::TruncatedData);
+    }
     if child_offsets.first() != Some(&0) {
         return Err(TrieError::TruncatedData);
     }
@@ -247,10 +253,11 @@ pub(crate) fn validate_cheap(
 /// later if callers need to reject malformed input before any query.
 #[cfg(test)]
 pub(crate) fn validate_strict(
+    nodes: &[Node],
     child_offsets: &[u32],
     children_list: &[u32],
 ) -> Result<(), TrieError> {
-    validate_cheap(child_offsets, children_list)?;
+    validate_cheap(nodes, child_offsets, children_list)?;
     for w in child_offsets.windows(2) {
         if w[0] > w[1] {
             return Err(TrieError::TruncatedData);
@@ -470,10 +477,26 @@ mod tests {
         // O(N) monotonicity check to keep zero-copy deserialization O(1).
         // `validate_strict` is the opt-in O(N) path callers can run when
         // they need to reject malformed input before any query.
+        let nodes = vec![crate::Node::default(); 3];
         let child_offsets: Vec<u32> = vec![0, 5, 2, 0]; // non-monotonic: 5 > 2
         let children_list: Vec<u32> = vec![0u32; 0];
         assert!(matches!(
-            validate_strict(&child_offsets, &children_list),
+            validate_strict(&nodes, &child_offsets, &children_list),
+            Err(TrieError::TruncatedData)
+        ));
+    }
+
+    #[test]
+    fn validate_cheap_rejects_wrong_child_offsets_length() {
+        // child_offsets.len() must equal nodes.len() + 1. If a corrupt buffer
+        // claims N nodes but embeds a different-length child_offsets, the
+        // load path must reject at the O(1) check.
+        let nodes = vec![crate::Node::default(); 3];
+        // Expected: length 4. Provide length 3 instead.
+        let child_offsets: Vec<u32> = vec![0, 0, 0];
+        let children_list: Vec<u32> = vec![];
+        assert!(matches!(
+            validate_cheap(&nodes, &child_offsets, &children_list),
             Err(TrieError::TruncatedData)
         ));
     }

@@ -76,7 +76,7 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
             std::slice::from_raw_parts(children_list_ptr as *const u32, header.children_count)
         };
 
-        validate_cheap(child_offsets, children_list)?;
+        validate_cheap(nodes, child_offsets, children_list)?;
 
         // code_map is always deserialized to heap
         let (code_map, _) = CodeMapper::from_bytes(

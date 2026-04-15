@@ -18,6 +18,10 @@ All notable changes to this crate are documented in this file.
   invalid sentinel so that `check == 0` has a single unambiguous
   meaning ("unused slot"). Serialized files built with 0.2.x cannot be
   read by 0.3 — see "Binary format" above.
+- `CodeMapper::reverse` returns `Option<u32>` instead of `u32`. Out-of-
+  range codes previously panicked in release builds (OOB index); they
+  now yield `None` so callers can decide. Existing code that reads the
+  result with `expect`/`unwrap` will need a trivial adjustment.
 
 ### Fixed
 
@@ -25,6 +29,13 @@ All notable changes to this crate are documented in this file.
   child placement order at build time and an `O(alphabet_size)` scan at
   query time. The CSR children list stores the order explicitly, making
   the #21 class of drop-children bugs structurally impossible.
+- `CodeMapper::reverse` with an out-of-range code now returns `None`
+  instead of panicking in release builds.
+- `DoubleArray::build` now explicitly rejects input with more than
+  `2^31 - 1` keys, rather than silently truncating `value_id` on cast.
+- `validate_cheap` additionally verifies
+  `child_offsets.len() == nodes.len() + 1` so corrupt inputs fail at
+  load time rather than producing confusing downstream errors.
 
 ### Performance (50k hiragana char keys, measured against 0.2.2)
 

@@ -247,7 +247,15 @@ impl<L: Label> DoubleArray<L> {
     /// # Panics
     /// - If keys are not sorted in ascending order.
     /// - If duplicate keys are found.
+    /// - If `keys.len() > 2^31 - 1` (value_id is stored in 31 bits).
     pub fn build(keys: &[impl AsRef<[L]>]) -> Self {
+        // value_id occupies the low 31 bits of Node::base; the MSB is the
+        // IS_LEAF flag. Reject key counts that would silently truncate.
+        assert!(
+            keys.len() <= 0x7FFF_FFFF,
+            "keys.len() exceeds the 31-bit value_id limit (max 2_147_483_647)"
+        );
+
         // Verify sorted and no duplicates
         for w in keys.windows(2) {
             assert!(

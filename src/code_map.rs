@@ -94,15 +94,15 @@ impl CodeMapper {
         }
     }
 
-    /// Returns the label (as u32) for a code. Code 0 is the terminal symbol.
+    /// Returns the label (as u32) for a code, or `None` if the code is out
+    /// of range for this mapper. Code 0 is the terminal symbol.
+    ///
+    /// Out-of-range codes are returned as `None` rather than a panic so that
+    /// corrupted / malformed serialized data surfaces as a graceful signal
+    /// at the call site instead of an OOB index panic in release builds.
     #[inline]
-    pub fn reverse(&self, code: u32) -> u32 {
-        debug_assert!(
-            (code as usize) < self.reverse_table.len(),
-            "code {code} out of bounds (alphabet_size {})",
-            self.alphabet_size
-        );
-        self.reverse_table[code as usize]
+    pub fn reverse(&self, code: u32) -> Option<u32> {
+        self.reverse_table.get(code as usize).copied()
     }
 
     /// The number of distinct codes including the terminal symbol.
@@ -250,9 +250,18 @@ mod tests {
         for label in [b'a', b'b', b'c', b'd', b'e'] {
             let code = cm.get(label);
             assert_ne!(code, 0);
-            let back = cm.reverse(code);
+            let back = cm.reverse(code).expect("mapped code must reverse");
             assert_eq!(back, label as u32);
         }
+    }
+
+    #[test]
+    fn reverse_out_of_range_is_none() {
+        let keys: Vec<Vec<u8>> = vec![vec![b'a', b'b']];
+        let cm = CodeMapper::build(&keys);
+        // alphabet_size = 3 (terminal + 'a' + 'b'), so code 3+ is out of range
+        assert_eq!(cm.reverse(3), None);
+        assert_eq!(cm.reverse(u32::MAX), None);
     }
 
     #[test]
@@ -267,8 +276,8 @@ mod tests {
         assert_ne!(code_u, 0);
 
         // Round trip
-        assert_eq!(cm.reverse(code_a), 'あ' as u32);
-        assert_eq!(cm.reverse(code_u), 'う' as u32);
+        assert_eq!(cm.reverse(code_a), Some('あ' as u32));
+        assert_eq!(cm.reverse(code_u), Some('う' as u32));
     }
 
     #[test]
