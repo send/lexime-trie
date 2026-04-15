@@ -3,12 +3,15 @@ use crate::{CodeMapper, DoubleArray, Label, Node};
 /// Mutable state used during trie construction.
 struct BuildContext {
     nodes: Vec<Node>,
-    /// Flat list of (parent, child) edges recorded during recursion, in DFS
-    /// order. Converted to `child_offsets` + `children_list` at finalisation
-    /// via an O(N + E) count-and-scatter pass (no sort needed: scatter
-    /// preserves DFS insertion order within each parent, which matches the
-    /// desired code-ascending ordering because `build_trie` processes
-    /// children in that order).
+    /// Flat list of (parent, child) edges appended as children are placed.
+    /// The global order across parents is unspecified (the build walks the
+    /// trie with an iterative LIFO work stack), but the key invariant is
+    /// per-parent: all edges for a given parent are pushed together in a
+    /// single code-ascending sweep. Converted to `child_offsets` +
+    /// `children_list` at finalisation via an O(N + E) count-and-scatter
+    /// pass — no sort needed, because scatter preserves insertion order
+    /// within each parent bucket, which is exactly the code-ascending
+    /// ordering the final slice requires.
     edges: Vec<(u32, u32)>,
     free_list: FreeList,
     /// Highest node index ever written to. Maintained incrementally as
@@ -154,10 +157,13 @@ impl BuildContext {
         depth: usize,
         parent: u32,
     ) {
-        // Work frames: (begin, end, depth, parent). Initial capacity is a
-        // heuristic — the stack only ever holds one frame per ancestor on
-        // the current DFS path, not per subtree, so it stays small in
-        // practice.
+        // Work frames: (begin, end, depth, parent). Capacity is left as the
+        // default heuristic. This is a push-all-children DFS, so the stack
+        // holds every not-yet-visited child across the current frontier —
+        // including pending sibling subtrees, not only frames along the
+        // path from the root. Peak depth is therefore bounded by the
+        // active frontier size, which for balanced tries stays modest but
+        // can grow with very wide branching.
         let mut stack: Vec<(usize, usize, usize, u32)> = Vec::new();
         stack.push((begin, end, depth, parent));
 
