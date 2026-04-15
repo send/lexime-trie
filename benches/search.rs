@@ -87,6 +87,10 @@ fn bench_serial(c: &mut Criterion) {
             let _ = DoubleArray::<char>::from_bytes(black_box(&bytes)).unwrap();
         });
     });
+    // Name kept as `serial_from_bytes_ref` (not `..._from_bytes`) so
+    // historical Criterion baselines saved before the 0.4 rename of
+    // `DoubleArrayRef::from_bytes_ref` → `from_bytes` remain
+    // comparable. Restored deliberately in commit 4a7466b.
     c.bench_function("serial_from_bytes_ref", |b| {
         b.iter(|| {
             let _ = DoubleArrayRef::<char>::from_bytes(black_box(&bytes)).unwrap();

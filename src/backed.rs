@@ -83,17 +83,17 @@ unsafe impl StableBacking for &[u8] {}
 /// # Ok::<(), lexime_trie::TrieError>(())
 /// ```
 ///
-/// The example is `no_run` because `Vec<u8>` only inherits the global
-/// allocator's alignment guarantee (≥ 8 bytes on every supported system
-/// allocator, comfortably covering the 4-byte requirement of the
-/// zero-copy loader). Miri's allocator deliberately weakens that to
-/// 1 byte, so running this snippet under `cargo miri test --doc` would
-/// trip [`TrieError::MisalignedData`]. In production with a system
-/// allocator, the snippet works as written.
+/// The example is `no_run` because Rust only guarantees `Vec<u8>`
+/// allocations have 1-byte alignment. Most system allocators happen
+/// to return word-aligned memory in practice, which is enough for the
+/// 4-byte requirement of the zero-copy loader, but that stronger
+/// alignment is not a portable guarantee — it can be broken by a
+/// custom `GlobalAlloc` and is deliberately weakened under Miri. So
+/// running this snippet under `cargo miri test --doc` would trip
+/// [`TrieError::MisalignedData`].
 ///
-/// For a runnable variant — and for buffers that genuinely lack the
-/// 4-byte guarantee (custom `GlobalAlloc`, slices carved from larger
-/// regions, etc.) — borrow into a 4-byte aligned scratch buffer:
+/// For a runnable variant — and for callers that need a real 4-byte
+/// alignment guarantee — borrow into a 4-byte aligned scratch buffer:
 ///
 /// ```
 /// use lexime_trie::{DoubleArray, DoubleArrayBacked, TrieSearch};
