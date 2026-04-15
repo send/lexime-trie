@@ -70,21 +70,23 @@ unsafe impl StableBacking for &[u8] {}
 ///
 /// Use this when you want a self-contained, movable trie value that owns
 /// its backing storage — without propagating a lifetime parameter through
-/// every call site. The typical case is memory-mapping a trie file:
+/// every call site. A typical owned-buffer construction:
 ///
-/// ```no_run
-/// use std::fs::File;
-/// # // `memmap2` is illustrative; not a dependency of this crate.
-/// # type Mmap = &'static [u8];
-/// # fn map(_: &File) -> Result<Mmap, std::io::Error> { unimplemented!() }
-/// use lexime_trie::{DoubleArrayBacked, TrieSearch};
-///
-/// let file = File::open("trie.bin")?;
-/// let mmap = map(&file)?;
-/// let trie: DoubleArrayBacked<u8, Mmap> = DoubleArrayBacked::from_backing(mmap)?;
-/// assert!(trie.exact_match(b"hello").is_some());
-/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+/// use lexime_trie::{DoubleArray, DoubleArrayBacked, TrieSearch};
+///
+/// let keys: Vec<&[u8]> = vec![b"hello", b"world"];
+/// let bytes: Vec<u8> = DoubleArray::<u8>::build(&keys).as_bytes();
+/// let trie: DoubleArrayBacked<u8, Vec<u8>> =
+///     DoubleArrayBacked::from_backing(bytes)?;
+/// assert_eq!(trie.exact_match(b"hello"), Some(0));
+/// # Ok::<(), lexime_trie::TrieError>(())
+/// ```
+///
+/// To memory-map a trie file, wrap `memmap2::Mmap` in a local newtype
+/// with `AsRef<[u8]>` + `unsafe impl StableBacking` — see the
+/// [`StableBacking`] docs for the 4-line pattern. `DoubleArrayBacked`
+/// does not itself depend on `memmap2`.
 ///
 /// Internally this is a self-referential structure: the stored view
 /// borrows into the stored backing. The public API never leaks the

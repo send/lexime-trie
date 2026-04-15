@@ -117,7 +117,7 @@ pub struct CodeMapper {
 ```
 
 - At build time, label frequencies across all keys are counted; higher-frequency labels receive smaller codes
-- Example: ~80 hiragana + ~80 katakana + ~3000 kanji → effective ALPHABET_SIZE ≈ 4000
+- Example: ~80 hiragana + ~80 katakana + ~3000 kanji → effective alphabet size ≈ 4000
 - Code 0 is reserved for the terminal symbol
 - Same approach as crawdad's Mapped scheme (Kanda et al. 2023)
 - `reverse_table` is used for key reconstruction in `predictive_search`
@@ -168,23 +168,15 @@ lexime integration:
 ### Label Trait
 
 ```rust
-pub trait Label: Copy + Ord + Into<u32> + TryFrom<u32> {
-    /// Maximum label value + 1 (used for array allocation)
-    const ALPHABET_SIZE: u32;
-}
+pub trait Label: Copy + Ord + Into<u32> + TryFrom<u32> {}
 
-impl Label for u8 {
-    const ALPHABET_SIZE: u32 = 256;
-}
-
-impl Label for char {
-    const ALPHABET_SIZE: u32 = 0x11_0000;
-}
+impl Label for u8 {}
+impl Label for char {}
 ```
 
 Dictionary trie uses `DoubleArray<char>` + CodeMapper; romaji trie uses `DoubleArray<u8>`.
-CodeMapper compresses the effective label space to ~4000, so `char::ALPHABET_SIZE` does not
-affect the array size.
+CodeMapper compresses the effective label space to ~4000, so the size of the raw label
+space (e.g. `char`'s 0x11_0000 codepoints) does not affect the array size.
 
 ### DoubleArray
 

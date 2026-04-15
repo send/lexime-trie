@@ -116,7 +116,7 @@ pub struct CodeMapper {
 ```
 
 - ビルド時に全キーの文字頻度を集計 → 高頻度文字ほど小さい code を割り当て
-- 例: ひらがな ~80 種 + カタカナ ~80 種 + 漢字 ~3000 種 → 実効 ALPHABET_SIZE ≈ 4000
+- 例: ひらがな ~80 種 + カタカナ ~80 種 + 漢字 ~3000 種 → 実効 alphabet size ≈ 4000
 - code 0 はターミナルシンボル用に予約
 - crawdad の Mapped scheme (Kanda et al. 2023) と同一手法
 - `reverse_table` は `predictive_search` でのキー復元に使用
@@ -168,23 +168,15 @@ lexime での対応:
 ### Label trait
 
 ```rust
-pub trait Label: Copy + Ord + Into<u32> + TryFrom<u32> {
-    /// ラベルの最大値 + 1 (配列確保に使用)
-    const ALPHABET_SIZE: u32;
-}
+pub trait Label: Copy + Ord + Into<u32> + TryFrom<u32> {}
 
-impl Label for u8 {
-    const ALPHABET_SIZE: u32 = 256;
-}
-
-impl Label for char {
-    const ALPHABET_SIZE: u32 = 0x11_0000;
-}
+impl Label for u8 {}
+impl Label for char {}
 ```
 
 辞書 Trie は `DoubleArray<char>` + CodeMapper、ローマ字 Trie は `DoubleArray<u8>` を使用。
 CodeMapper によりラベル空間は実効 ~4000 に圧縮されるため、
-`char::ALPHABET_SIZE` の大きさは配列サイズに影響しない。
+素の Unicode 空間 (`char` の 0x11_0000 codepoint) の大きさは配列サイズに影響しない。
 
 ### DoubleArray
 

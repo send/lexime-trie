@@ -46,40 +46,75 @@ wrapper for the zero-copy view.
 - **`Node::raw_base`, `Node::raw_check`, `Node::from_raw`
   removed.** These existed for external serialisation callers
   that never materialised.
+- **`DoubleArrayRef::from_bytes_ref` → `DoubleArrayRef::from_bytes`.**
+  The `_ref` suffix was redundant with the type's own name;
+  renaming puts `DoubleArray::from_bytes` and
+  `DoubleArrayRef::from_bytes` side-by-side.
+- **`TrieSearch` is not dyn-compatible.** The trait uses
+  return-position `impl Trait` for iterators, so `&dyn
+  TrieSearch<L>` does not compile. Use the trait as a generic
+  bound (`fn foo<T: TrieSearch<u8>>`) instead.
 
 ### Added
 
-- **`DoubleArrayBacked<L, B: AsRef<[u8]>>`.** A `DoubleArrayRef`
+- **`DoubleArrayBacked<L, B: StableBacking>`.** A `DoubleArrayRef`
   bundled with the byte buffer it borrows from. Removes the
   self-referential-struct friction that forced consumers like
   lexime to use `mem::transmute<DoubleArrayRef<'_, u8>,
   DoubleArrayRef<'static, u8>>` to keep an mmap and its view in
-  the same owning struct. Backing can be anything satisfying
-  `AsRef<[u8]>` with a stable-on-move data pointer (`Vec<u8>`,
-  `Box<[u8]>`, `Arc<[u8]>`, `&'static [u8]`, `memmap2::Mmap`,
-  etc.). Implements `TrieSearch<L>`. Provides `as_view()` to
-  borrow the inner view and `into_backing()` to recover the
-  original buffer.
+  the same owning struct. Constructor is `from_backing`.
+  Implements `TrieSearch<L>`. Derives `Clone` when `B: Clone`
+  (re-parses from the cloned backing, since a naive derive would
+  leave the clone's view pointing into the original backing).
+  Provides `as_view()` to borrow the inner view and
+  `into_backing()` to recover the original buffer.
+- **`StableBacking` marker trait.** `unsafe trait` that promises
+  the implementing type's `AsRef<[u8]>::as_ref` pointer stays
+  valid across moves of `Self` and the bytes do not change
+  afterwards. `DoubleArrayBacked<L, B>` now bounds `B` by
+  `StableBacking` so the invariant that made the previous
+  `AsRef<[u8]>` contract sound-on-paper is enforced at the
+  type level. Pre-blessed implementations: `Vec<u8>`,
+  `Box<[u8]>`, `Arc<[u8]>`, `Rc<[u8]>`, `&[u8]`. To use
+  `memmap2::Mmap` or another external type, wrap it in a local
+  newtype with `AsRef<[u8]>` + `unsafe impl StableBacking` (the
+  trait docs show the 4-line pattern). Inline-storage types
+  such as `[u8; N]`, `SmallVec` inline mode, and
+  `heapless::Vec` explicitly violate the contract and must not
+  implement the trait.
 - **`TrieSearch::validate_strict()`.** O(N) structural
   validation: all cheap checks plus monotonicity of
   `child_offsets`. Run this after loading from an untrusted
   source to reject malformed buffers before any query. Not
-  invoked by `from_bytes` / `from_bytes_ref`.
+  invoked by either `from_bytes` constructor.
+- **`DoubleArrayRef<'a, L>` now derives `Clone`** and implements
+  a compact `Debug`. `DoubleArrayBacked<L, B>` gains the same
+  derives (hand-written to re-parse on clone).
 
 ### Migration (0.3.x → 0.4.0)
 
 1. Add `use lexime_trie::TrieSearch;` at every call site of
    `exact_match`, `common_prefix_search`, `predictive_search`,
-   `probe`, or `node_slot_count`. (The compiler will point this
-   out — the error message suggests the exact import.)
+   `probe`, `node_slot_count`, or `validate_strict`. The
+   compiler's error message suggests the exact import.
 2. Rename any `.num_nodes()` to `.node_slot_count()`.
-3. If you were matching on `lexime_trie::Node` or
+3. Rename `DoubleArrayRef::from_bytes_ref` to
+   `DoubleArrayRef::from_bytes`.
+4. If you were matching on `lexime_trie::Node` or
    `lexime_trie::CodeMapper`, you can no longer do so; these
    types are internal in 0.4. No replacement is needed for
    typical use — all trie operations are on the owner types.
-4. If you were keeping an mmap and a `DoubleArrayRef<'static,
-   L>` in the same struct via `mem::transmute`, replace that
-   pattern with `DoubleArrayBacked::new(mmap)`.
+5. If you were keeping an `mmap` (or `Arc<[u8]>`, `Vec<u8>`,
+   etc.) and a `DoubleArrayRef<'static, L>` in the same struct
+   via `mem::transmute`, replace that pattern with
+   `DoubleArrayBacked::from_backing(backing)`. For `memmap2::Mmap`
+   specifically, wrap the mapping in a local newtype that
+   implements `AsRef<[u8]>` + `unsafe impl StableBacking`.
+   Note: if your `open()` function also stores *other*
+   `&'static` slices into the same mmap (string pools, index
+   tables, etc.), those still need their own bundling solution
+   — `DoubleArrayBacked` only covers the trie view. You can
+   apply the same self-referential-newtype recipe for them.
 
 Existing serialised buffers (v3 format, 0.3.0 and 0.3.1) load
 unchanged; the binary format itself is unchanged.

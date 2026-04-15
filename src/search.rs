@@ -30,12 +30,18 @@ pub struct ProbeResult {
     pub has_children: bool,
 }
 
-/// Search and introspection operations shared by [`DoubleArray`] (owned)
-/// and [`DoubleArrayRef`](crate::DoubleArrayRef) (zero-copy borrowed).
+/// Search and introspection operations shared by [`DoubleArray`] (owned),
+/// [`DoubleArrayRef`](crate::DoubleArrayRef) (zero-copy borrowed), and
+/// [`DoubleArrayBacked`](crate::DoubleArrayBacked) (owned-buffer wrapper).
+///
+/// **Not dyn-compatible.** `common_prefix_search` and `predictive_search`
+/// return `impl Iterator<...>` (RPIT), which is not permitted through a
+/// trait object. Use the trait as a bound on generic functions
+/// (`fn foo<T: TrieSearch<u8>>(t: &T)`) rather than `&dyn TrieSearch<u8>`.
 ///
 /// Users should bring this trait into scope to call `exact_match`,
-/// `common_prefix_search`, `predictive_search`, or `probe` on either
-/// trie representation:
+/// `common_prefix_search`, `predictive_search`, or `probe` on any of
+/// the three trie representations:
 ///
 /// ```
 /// use lexime_trie::{DoubleArray, TrieSearch};
@@ -103,6 +109,22 @@ pub trait TrieSearch<L: Label> {
     /// issuing any queries; corrupted offsets cannot cause UB (Rust
     /// slice indexing is bounds-checked) but can produce wrong
     /// results at query time.
+    ///
+    /// ```
+    /// use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};
+    ///
+    /// # let da = DoubleArray::<u8>::build(&[b"hello".as_slice()]);
+    /// # let bytes = da.as_bytes();
+    /// // Align the buffer; `mmap`'d regions already satisfy this.
+    /// let mut aligned = vec![0u32; bytes.len().div_ceil(4)];
+    /// let slice: &mut [u8] = unsafe {
+    ///     std::slice::from_raw_parts_mut(aligned.as_mut_ptr() as *mut u8, bytes.len())
+    /// };
+    /// slice.copy_from_slice(&bytes);
+    /// let trie = DoubleArrayRef::<u8>::from_bytes(slice)?;
+    /// trie.validate_strict()?;
+    /// # Ok::<(), lexime_trie::TrieError>(())
+    /// ```
     fn validate_strict(&self) -> Result<(), TrieError>;
 }
 
