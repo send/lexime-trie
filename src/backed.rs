@@ -481,11 +481,17 @@ mod tests {
         // handle points at the same `[u8]` payload. The `Clone` impl
         // on `DoubleArrayBacked<L, Arc<[u8]>>` exploits this by
         // bitwise-copying the view instead of re-parsing.
+        //
+        // `Arc::from(&[u8])` copies the bytes into a fresh heap
+        // allocation; despite `[u8]` alone having 1-byte alignment,
+        // the resulting allocation is `usize`-aligned because the
+        // `ArcInner<[u8]>` layout places two `AtomicUsize` strong/weak
+        // counters before the data. `usize` is ≥ 4 bytes on every
+        // supported platform, so the data pointer comfortably meets
+        // the loader's 4-byte requirement — verified by Miri in CI.
         use std::sync::Arc;
         let keys: Vec<&[u8]> = vec![b"abc", b"xyz"];
         let da = DoubleArray::<u8>::build(&keys);
-        // Aligned backing via Vec<u32> → Arc<[u8]> — a realistic path
-        // for shipping an mmap-like handle.
         let aligned = AlignedBytes::new(&da.as_bytes());
         let arc: Arc<[u8]> = Arc::from(aligned.as_slice());
         let original = DoubleArrayBacked::<u8, Arc<[u8]>>::from_backing(arc).unwrap();

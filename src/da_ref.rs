@@ -95,7 +95,11 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
         // SAFETY:
         // - `Node` is `#[repr(C)]` with two `u32` fields, size 8, align 4, no padding.
         // - `u32` is size 4 align 4 with no invalid bit patterns.
-        // - We verified alignment and bounds above (via `HeaderV3::parse`).
+        // - Pointer alignment (4 bytes for both `Node` and `u32`) was
+        //   verified by the three `is_multiple_of` checks immediately above.
+        // - Section bounds — that each `{nodes, child_offsets, children_list}`
+        //   slice fits inside the input buffer — were verified by
+        //   `HeaderV3::parse` when it computed the section offsets.
         // - The lifetime `'a` of the transient slices is tied to the input buffer.
         // - We only support little-endian platforms where the in-memory layout
         //   matches the serialized LE format.
