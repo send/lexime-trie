@@ -87,7 +87,7 @@ fn bench_serial(c: &mut Criterion) {
             let _ = DoubleArray::<char>::from_bytes(black_box(&bytes)).unwrap();
         });
     });
-    c.bench_function("serial_from_bytes", |b| {
+    c.bench_function("serial_from_bytes_ref", |b| {
         b.iter(|| {
             let _ = DoubleArrayRef::<char>::from_bytes(black_box(&bytes)).unwrap();
         });
