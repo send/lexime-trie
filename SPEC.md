@@ -33,7 +33,7 @@ The `RomajiTrie` currently uses a `HashMap<u8, Node>` tree, which can be replace
 | yada | byte-wise | 8B | No | Rust port of darts-clone |
 | crawdad | char-wise | 8B | No | Used by vibrato (2x faster than MeCab) |
 | trie-rs | byte-wise | LOUDS | Yes | Currently used by lexime |
-| **lexime-trie** | **char-wise** | **8B (+4B sibling)** | **Yes** | crawdad approach + predictive_search |
+| **lexime-trie** | **char-wise** | **8B + CSR children** | **Yes** | crawdad approach + predictive_search |
 
 crawdad benchmarks (ipadic-neologd, 5.5M keys):
 
@@ -45,7 +45,7 @@ crawdad benchmarks (ipadic-neologd, 5.5M keys):
 | Memory | 121 MiB | 153 MiB | 20% smaller |
 
 lexime-trie adopts crawdad's char-wise + CodeMapper approach, adding
-**predictive_search** (sibling chain) and **probe** which crawdad lacks.
+**predictive_search** (via CSR children list) and **probe** which crawdad lacks.
 
 ## Data Structures
 
@@ -68,23 +68,37 @@ pub struct Node {
 - HAS_LEAF: MSB of check. When set, a terminal child (code 0) exists
 - Child lookup is O(1): direct index via `base XOR label`
 
-### Sibling Array (Parallel SoA Layout)
+### Children List (CSR Layout)
 
 ```rust
-siblings: Vec<u32>   // parallel array, same length as nodes
+child_offsets: Vec<u32>    // length N + 1
+children_list: Vec<u32>    // length E (total edge count)
 ```
 
-- `siblings[i]` — index of the next sibling node sharing the same parent (0 = none)
-- **Not included in the Node struct** — Structure of Arrays (SoA) layout
-- `common_prefix_search` / `exact_match` access only `nodes` (**8B/node**)
-- `predictive_search` / `probe` also access `siblings` (effective 12B/node)
+For any parent node at index `p`, its children are:
 
-| Operation | Arrays Accessed | Effective Node Size |
-|-----------|----------------|---------------------|
-| `exact_match` | `nodes` only | **8B** |
-| `common_prefix_search` | `nodes` only | **8B** |
-| `probe` | `nodes` + `siblings` | 12B |
-| `predictive_search` | `nodes` + `siblings` | 12B |
+```
+children_list[child_offsets[p] .. child_offsets[p+1]]
+```
+
+Children appear in code-ascending order within each parent's slice, so the
+terminal child (code 0, if present) is always first.
+
+- **Not stored inside the `Node` struct** — SoA layout keeps the hot paths tight.
+- `exact_match` / `common_prefix_search` touch only `nodes` and preserve the
+  **8B/node** hot path.
+- `probe` reads `nodes` + `child_offsets` (one extra u32 pair per query).
+- `predictive_search` reads all three arrays.
+- `nodes[0]` is an invalid sentinel; the root lives at `nodes[1]`. This
+  removes the ambiguity between "child of root" and "unused slot" that
+  `check == 0` used to carry in earlier designs.
+
+| Operation | Arrays Accessed |
+|-----------|-----------------|
+| `exact_match` | `nodes` only |
+| `common_prefix_search` | `nodes` only |
+| `probe` | `nodes` + `child_offsets` |
+| `predictive_search` | `nodes` + `child_offsets` + `children_list` |
 
 ### CodeMapper (Frequency-Ordered Label Remapping)
 
@@ -108,7 +122,7 @@ pub struct CodeMapper {
 - Same approach as crawdad's Mapped scheme (Kanda et al. 2023)
 - `reverse_table` is used for key reconstruction in `predictive_search`
 - `DoubleArray<u8>` (romaji trie) also uses frequency-ordered CodeMapper;
-  this produces denser arrays and narrower `first_child()` scan ranges than an identity mapping
+  this produces denser arrays than an identity mapping
 
 ### Value Storage (Terminal Symbol Approach)
 
@@ -176,9 +190,10 @@ affect the array size.
 
 ```rust
 pub struct DoubleArray<L: Label> {
-    nodes: Vec<Node>,
-    siblings: Vec<u32>,       // parallel array (for predictive_search / probe)
-    code_map: CodeMapper,     // label → internal code mapping
+    nodes: Vec<Node>,           // nodes[0] = sentinel, nodes[1] = root
+    child_offsets: Vec<u32>,    // CSR offsets, length nodes.len() + 1
+    children_list: Vec<u32>,    // flat list of child indices, length E
+    code_map: CodeMapper,       // label → internal code mapping
     _phantom: PhantomData<L>,
 }
 ```
@@ -196,13 +211,18 @@ impl<L: Label> DoubleArray<L> {
 }
 ```
 
-- Input: sorted key array. `keys[i]` gets value_id `i`
+- Input: sorted key array. `keys[i]` gets value_id `i`.
 - Build steps:
-  1. Count label frequencies across all keys → build CodeMapper
-  2. Convert keys to remapped code sequences + append terminal symbol
+  1. Count label frequencies across all keys → build CodeMapper.
+  2. Convert keys to remapped code sequences + append terminal symbol.
   3. Greedily place BASE values using a doubly-linked circular free list
-  4. Build sibling chains
-- Build runs once at dictionary compile time (`dictool compile`)
+     (indices 0 and 1 are reserved for the sentinel and the root).
+  4. Record each placed edge `(parent, child)` into a flat edge vector.
+  5. After recursion completes, run an O(N + E) count-and-scatter pass
+     to flatten edges into `child_offsets` + `children_list`. Within-
+     parent order is preserved because edges are enqueued in code-ascending
+     order and scatter writes them to consecutive slots.
+- Build runs once at dictionary compile time (`dictool compile`).
 
 ### Search Operations
 
@@ -216,21 +236,23 @@ impl<L: Label> DoubleArray<L> {
     pub fn common_prefix_search<'a>(&'a self, query: &'a [L])
         -> impl Iterator<Item = PrefixMatch> + 'a;
 
-    /// Predictive search. Returns all keys starting with `prefix` via sibling chain DFS.
-    /// Used for predict / predict_ranked in dictionary.
+    /// Predictive search. Returns all keys starting with `prefix` by iterating
+    /// each node's `children_list` slice in a DFS order. Used for
+    /// predict / predict_ranked in dictionary.
     pub fn predictive_search<'a>(&'a self, prefix: &'a [L])
         -> impl Iterator<Item = SearchMatch<L>> + 'a;
 
     /// Probe a key. Returns whether the key exists and whether it has children.
     /// Used for romaji trie lookup (None/Prefix/Exact/ExactAndPrefix).
     ///
-    /// O(1) determination via the terminal symbol approach:
-    /// 1. Traversal fails → None
-    /// 2. Reach node N → check terminal child at base(N) XOR 0
-    ///    - Terminal child exists → value = Some(value_id),
-    ///      has_children = (siblings[terminal] != 0)
-    ///    - No terminal child → value = None, has_children = true
-    ///      (since N exists, keys reachable through its children must exist)
+    /// O(1) determination:
+    /// 1. Traversal fails → None.
+    /// 2. Reach node N. If `has_leaf(N)`, the terminal child is at
+    ///    `base(N) XOR 0 == base(N)`. `has_children` is read from the
+    ///    CSR slice width: `(child_offsets[N+1] - child_offsets[N]) > 1`
+    ///    means more than just the terminal.
+    /// 3. If `has_leaf(N)` is false, `value = None` and
+    ///    `has_children = (child_offsets[N+1] - child_offsets[N]) > 0`.
     pub fn probe(&self, key: &[L]) -> ProbeResult;
 }
 
@@ -250,11 +272,11 @@ pub struct ProbeResult {
 }
 ```
 
-### Serialization (LXTR v2)
+### Serialization (LXTR v3)
 
 ```rust
 impl<L: Label> DoubleArray<L> {
-    /// Serializes the internal data to a raw byte representation (v2 format).
+    /// Serializes the internal data to a raw byte representation (v3 format).
     pub fn as_bytes(&self) -> Vec<u8>;
 
     /// Restores a DoubleArray from raw bytes (copy).
@@ -262,75 +284,107 @@ impl<L: Label> DoubleArray<L> {
 }
 ```
 
-**v2 binary format** (24-byte header, 8-byte aligned):
+**v3 binary format** (24-byte header, 8-byte aligned):
 
 ```
-Offset  Size  Content
-0       4     Magic: "LXTR"
-4       1     Version: 0x02
-5       3     Reserved: [0, 0, 0]
-8       4     nodes_len (u32 LE, in bytes)
-12      4     siblings_len (u32 LE, in bytes)
-16      4     code_map_len (u32 LE, in bytes)
-20      4     Reserved: [0, 0, 0, 0]
-24      N     nodes data (each node: base LE u32 + check LE u32)
-24+N    S     siblings data (each: u32 LE)
-24+N+S  C     code_map data
+Offset                        Size       Content
+0                             4          Magic: "LXTR"
+4                             1          Version: 0x03
+5                             3          Reserved: [0, 0, 0]
+8                             4          nodes_count    (u32 LE, = N)
+12                            4          children_count (u32 LE, = E)
+16                            4          code_map_len   (u32 LE, in bytes)
+20                            4          Reserved: [0, 0, 0, 0]
+24                            N*8        nodes (base LE u32 + check LE u32)
+24+N*8                        (N+1)*4    child_offsets (each: u32 LE)
+24+N*8+(N+1)*4                E*4        children_list (each: u32 LE)
+24+N*8+(N+1)*4+E*4            M          code_map data
 ```
 
-- The 24-byte header ensures `nodes` data starts at an 8-byte boundary (exceeds the 4-byte alignment required by `Node`/`u32`)
-- Three sections: `nodes`, `siblings`, `code_map`
-- Raw `#[repr(C)]` data (serialized as little-endian)
-- Copy-load: ~5ms, runs once at app startup
-- **Little-endian only**: the crate requires a little-endian platform (`compile_error!` on BE).
-  Serialization writes native LE layout directly, enabling zero-copy deserialization without byte-swapping
+- Sizes are in **count** units, not bytes. The byte length of each fixed
+  section is derivable from `nodes_count` and `children_count`, which
+  eliminates the "length mismatch" class of errors v2 had to validate
+  against.
+- Four sections: `nodes`, `child_offsets`, `children_list`, `code_map`.
+- The 24-byte header keeps `nodes` 8-byte aligned; all subsequent sections
+  are at least 4-byte aligned, satisfying `Node` and `u32` requirements.
+- Raw `#[repr(C)]` data (little-endian), enabling zero-copy deserialization.
+- **Little-endian only** (enforced by `compile_error!`).
+- **v2 compatibility was dropped at v0.3**. `from_bytes` / `from_bytes_ref`
+  return `InvalidVersion` for version != 3. Persisted v2 files must be
+  rebuilt from the original keys.
+
+#### Load-time validation
+
+`from_bytes` / `from_bytes_ref` run only O(1) checks:
+
+- Magic, version, buffer size arithmetic.
+- `nodes_count >= 2` (sentinel + root).
+- Section alignments (zero-copy path only).
+- `child_offsets[0] == 0` and `child_offsets[N] == children_count`.
+
+Monotonicity of `child_offsets` is intentionally **not** checked at load
+time — it would be O(N) and defeat the zero-copy promise. A malformed
+offset cannot cause UB: Rust slice indexing is always bounds-checked,
+so corruption surfaces as a graceful panic on query. Callers that need
+hard guarantees before any query can run a strict O(N) validator
+separately.
 
 ### Zero-Copy Deserialization
 
 ```rust
 pub struct DoubleArrayRef<'a, L: Label> {
-    nodes: &'a [Node],       // borrowed from byte buffer
-    siblings: &'a [u32],     // borrowed from byte buffer
-    code_map: CodeMapper,    // always heap-allocated (small)
+    nodes: &'a [Node],            // borrowed from byte buffer
+    child_offsets: &'a [u32],     // borrowed from byte buffer
+    children_list: &'a [u32],     // borrowed from byte buffer
+    code_map: CodeMapper,         // always heap-allocated (small)
     _phantom: PhantomData<L>,
 }
 
 impl<'a, L: Label> DoubleArrayRef<'a, L> {
-    /// Zero-copy deserialization from a byte slice (v2 format only).
+    /// Zero-copy deserialization from a byte slice (v3 format only).
     /// The buffer must be aligned to at least 4 bytes (for `Node` and `u32` access).
     pub fn from_bytes_ref(bytes: &'a [u8]) -> Result<Self, TrieError>;
 
     /// All search methods: exact_match, common_prefix_search,
     /// predictive_search, probe — identical API to DoubleArray.
 
-    /// Converts to an owned DoubleArray by copying nodes/siblings to heap.
+    /// Converts to an owned DoubleArray by copying the borrowed sections to heap.
     pub fn to_owned(&self) -> DoubleArray<L>;
 }
 ```
 
-- `nodes` and `siblings` are borrowed directly from the byte buffer via `unsafe` pointer cast
-- Safety relies on: `Node` being `#[repr(C)]` (8B, align 4, no padding), runtime alignment
-  validation, and LE-only target assumption (x86_64/aarch64)
-- `code_map` is always deserialized to heap (small, requires reconstruction from serialized form)
-- `from_bytes_ref` requires the LXTR v2 format (24-byte aligned header)
-- Typical use case: memory-map a file, then pass the buffer to `from_bytes_ref`
+- `nodes`, `child_offsets`, and `children_list` are borrowed directly from
+  the byte buffer via `unsafe` pointer cast.
+- Safety relies on: `Node` being `#[repr(C)]` (8B, align 4, no padding),
+  runtime alignment validation, and the LE-only target assumption.
+- `code_map` is always deserialized to heap (small, requires reconstruction
+  from serialized form).
+- `from_bytes_ref` requires the LXTR v3 format (24-byte aligned header).
+- `from_bytes_ref` is O(1) after the initial header parse — no loops over
+  `nodes`, `child_offsets`, or `children_list`.
+- Typical use case: memory-map a file, then pass the buffer to `from_bytes_ref`.
 
 ### Shared Search Logic (TrieView)
 
-All search methods (`traverse`, `exact_match`, `common_prefix_search`, `predictive_search`,
-`first_child`, `probe`) are implemented once in `TrieView<'a, L>`:
+All search methods (`traverse`, `exact_match`, `common_prefix_search`,
+`predictive_search`, `probe`) are implemented once in `TrieView<'a, L>`:
 
 ```rust
 #[derive(Clone, Copy)]
 pub(crate) struct TrieView<'a, L: Label> {
     nodes: &'a [Node],
-    siblings: &'a [u32],
+    child_offsets: &'a [u32],
+    children_list: &'a [u32],
     code_map: &'a CodeMapper,
     _phantom: PhantomData<L>,
 }
 ```
 
-Both `DoubleArray` and `DoubleArrayRef` delegate to `TrieView`, achieving zero code duplication.
+Both `DoubleArray` and `DoubleArrayRef` delegate to `TrieView`, achieving
+zero code duplication. Enumeration operations (`predictive_search`) iterate
+the CSR children slice directly, eliminating the O(alphabet_size) scan
+that earlier `first_child()` implementations relied on.
 
 ### Error Type
 
@@ -349,23 +403,25 @@ pub enum TrieError {
 
 ## Integration with lexime
 
-### Dictionary File Format (LXDX v2)
+### Dictionary File Format (LXDX, using LXTR v3 sections)
+
+The lexime dictionary file embeds an LXTR v3 trie followed by lexime-
+specific entry tables. The exact LXDX version is tracked separately in
+lexime's own repository; the section shapes below reflect the v3 trie
+layout:
 
 ```
-Offset      Size  Content
-──────────  ────  ──────────────────────────
-0           4     magic: "LXDX"
-4           1     version: 2
-5           4     nodes_len: u32
-9           4     siblings_len: u32
-13          4     code_map_len: u32
-17          4     offsets_len: u32
-21          4     entries_len: u32
-25          N     [Node; K]              ← lexime-trie: base+check
-25+N        S     [u32; K]               ← lexime-trie: siblings
-25+N+S      C     CodeMapper             ← lexime-trie: label mapping table
-25+N+S+C    O     [u32; V+1]             ← offset table
-25+N+S+C+O  E     [FlatDictEntry; M]     ← lexime: entry data
+Section                Content
+────────────────────   ──────────────────────────
+magic                  "LXDX" (4 bytes)
+version                dictionary format version
+...                    dictionary-specific counts
+nodes                  [Node; N]             ← lexime-trie: base+check
+child_offsets          [u32; N+1]            ← lexime-trie: CSR offsets
+children_list          [u32; E]              ← lexime-trie: CSR children
+code_map               CodeMapper            ← lexime-trie: label mapping
+offsets                [u32; V+1]            ← lexime: value_id → entry range
+entries                [FlatDictEntry; M]    ← lexime: entry data
 ```
 
 - `FlatDictEntry`: flat representation of `DictEntry` without `String`
@@ -420,10 +476,10 @@ lexime/
 │       ├── label.rs       Label trait + u8/char impl
 │       ├── node.rs        Node (base + check, 8B)
 │       ├── code_map.rs    CodeMapper (frequency-ordered label remapping)
-│       ├── build.rs       DoubleArray::build() + sibling chain construction
+│       ├── build.rs       DoubleArray::build() + CSR flatten
 │       ├── search.rs      search method delegation to TrieView
-│       ├── serial.rs      as_bytes, from_bytes
-│       ├── view.rs        TrieView — shared search logic (exact_match, common_prefix_search, etc.)
+│       ├── serial.rs      as_bytes, from_bytes, HeaderV3, validate_cheap
+│       ├── view.rs        TrieView — shared search logic
 │       └── da_ref.rs      DoubleArrayRef — zero-copy deserialization
 ├── engine/                ← existing crate (depends on lexime-trie)
 │   └── Cargo.toml         remove trie-rs, serde, bincode → add lexime-trie
@@ -438,11 +494,34 @@ lexime/
 ## Implementation Progress
 
 1. **Node + Label + CodeMapper** — basic type definitions and label remapping ✅
-2. **build** — build Double-Array from sorted keys (free list + sibling chain) ✅
+2. **build** — build Double-Array from sorted keys (free list + CSR flatten) ✅
 3. **exact_match** — simplest search ✅
 4. **common_prefix_search** — needed for lattice construction ✅
-5. **predictive_search** — needed for prediction (uses sibling chain) ✅
+5. **predictive_search** — needed for prediction (uses `children_list`) ✅
 6. **probe** — needed for romaji trie ✅
-7. **as_bytes / from_bytes** — serialization (LXTR v2 format) ✅
+7. **as_bytes / from_bytes** — serialization (LXTR v3 format) ✅
 8. **DoubleArrayRef / from_bytes_ref** — zero-copy mmap deserialization ✅
-9. **lexime integration** — replace TrieDictionary and RomajiTrie internals
+9. **v3 migration** — drop v2, move root to `nodes[1]`, replace siblings with CSR ✅
+10. **lexime integration** — replace TrieDictionary and RomajiTrie internals
+
+## Migration Notes
+
+### v0.2 → v0.3
+
+The v3 format is a **breaking change**. Persisted v2 files are rejected
+with `TrieError::InvalidVersion`. Rebuild from the original key set.
+
+Rationale:
+
+- `siblings: Vec<u32>` relied on an implicit invariant that children were
+  placed in the same order that `first_child()` rediscovered them at search
+  time. Any drift between placement and walk silently dropped keys from
+  `predictive_search` (see the #21 regression).
+- Replacing `siblings` with `child_offsets` + `children_list` makes the
+  ordering a stored property rather than an emergent one, eliminating the
+  drift class of bugs.
+- Moving the root to `nodes[1]` gives `check == 0` a single unambiguous
+  meaning ("unused slot"), removing several multi-condition defensive
+  checks from the search paths.
+- Removing the `first_child()` alphabet scan cuts `predictive_search` time
+  by ~47% on the 50k hiragana benchmark.
