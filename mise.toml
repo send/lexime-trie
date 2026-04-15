@@ -26,13 +26,19 @@ run = "cargo fmt --check"
 description = "Run tests under Miri (requires nightly)"
 run = "cargo +nightly miri test"
 
-[tasks.ci]
-description = "Run the full CI suite locally — mirrors .github/workflows/ci.yml (requires nightly for miri)"
+[tasks."ci:fast"]
+description = "Fast CI (no miri) — fmt, check, build, test"
 run = [
   "mise run fmt:check",
   "mise run check",
   "mise run build",
   "mise run test",
+]
+
+[tasks.ci]
+description = "Full CI — ci:fast + miri (requires nightly for miri)"
+run = [
+  "mise run ci:fast",
   "mise run miri",
 ]
 
