@@ -93,10 +93,6 @@ impl<'a, L: Label> TrieView<'a, L> {
             // None label = root entry; key_buf is already set to the prefix.
             stack.push((node, prefix.len() as u32, None));
         }
-        // In a valid trie the DFS pops each descendant of `prefix` at
-        // most once, so `nodes.len()` is a safe upper bound that never
-        // constrains a well-formed traversal. See `pops_remaining` on
-        // `PredictiveIter` for the corruption case this defends against.
         let pops_remaining = self.nodes.len();
         PredictiveIter {
             view: self,
@@ -248,18 +244,10 @@ pub(crate) struct PredictiveIter<'a, L: Label> {
     /// Shared key buffer. Grows/truncates as DFS proceeds, avoiding per-node
     /// Vec<L> clones. Only cloned when emitting a SearchMatch.
     key_buf: Vec<L>,
-    /// Hard cap on the total number of stack pops this iterator is
-    /// willing to perform, used as a termination safety net for
-    /// corrupted buffers. A non-monotonic `child_offsets` or poisoned
-    /// `children_list` entry can steer the DFS into a cycle, in which
-    /// case the corruption-tolerant bounds checks elsewhere on the hot
-    /// path keep us memory-safe but do not by themselves bound
-    /// iteration. Initialised to `nodes.len()` in `predictive_search`,
-    /// which is a valid upper bound on descendants for any well-formed
-    /// trie and therefore never curtails correct traversals.
-    /// `validate_strict` catches the underlying corruption when it is
-    /// run; this cap exists so callers that skip it still get a
-    /// terminating iterator.
+    /// Hard cap on stack pops so a corrupted CSR that forms a DFS cycle
+    /// still yields a terminating iterator. Initialised to `nodes.len()`,
+    /// an upper bound on pops in any valid trie, so the cap never
+    /// constrains well-formed traversals.
     pops_remaining: usize,
 }
 
@@ -269,10 +257,7 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
     fn next(&mut self) -> Option<SearchMatch<L>> {
         while let Some((node_idx, parent_depth, label)) = self.stack.pop() {
             if self.pops_remaining == 0 {
-                // Pop budget exhausted — a valid trie would have emptied
-                // the stack by now, so this is a corrupted buffer. Clear
-                // the residual stack so subsequent `next()` calls are
-                // cheap no-ops rather than re-checking this branch.
+                // Clear so subsequent `next()` calls are cheap no-ops.
                 self.stack.clear();
                 return None;
             }

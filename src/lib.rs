@@ -90,12 +90,10 @@ pub enum TrieError {
     /// for zero-copy access via [`DoubleArrayRef`] / [`DoubleArrayBacked`].
     MisalignedData,
     /// The buffer is long enough but violates a v3 structural invariant
-    /// (`nodes_count < 2`, declared section counts overflow the
-    /// platform's address space, CSR `child_offsets` length or endpoint
-    /// mismatch, or — under [`TrieSearch::validate_strict`] — a
-    /// non-monotonic child-offset sequence). Indicates the bytes are
-    /// corrupt rather than truncated; the remedy is to regenerate the
-    /// trie rather than re-fetch the buffer.
+    /// (declared counts, the CSR length/endpoint relationship, or — under
+    /// [`TrieSearch::validate_strict`] — child-offset monotonicity).
+    /// Indicates the bytes are corrupt rather than truncated; the remedy
+    /// is to regenerate the trie rather than re-fetch the buffer.
     InvalidStructure,
 }
 

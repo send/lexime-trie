@@ -50,17 +50,13 @@ Callers that matched on `TrieError` exhaustively should:
 The change is purely additive on the data-layout side — no v3 binary
 format changes. Existing `.lxtr` buffers load unchanged.
 
-### Internal
+### Improved
 
-- `predictive_search`'s iterator now carries a hard pop cap equal to
-  `nodes.len()` so it always terminates, even when a corrupted
-  `children_list` + `child_offsets` combination forms a DFS cycle.
-  A valid trie pops at most `nodes.len()` times, so the cap never
-  constrains well-formed traversals. `validate_strict` still catches
-  the underlying corruption up-front when run; this cap exists for
-  callers that skip validation.
-- `TrieView::probe` reuses the `get_unchecked` + explicit
-  bounds-check pattern from the other hot paths.
+- `predictive_search` now terminates even on corrupted buffers that
+  form a DFS cycle in the CSR children graph. Previously callers had
+  to wrap consumption with `.take(N)` as a guard; the iterator now
+  carries its own bound. `validate_strict` remains the recommended
+  up-front check for untrusted input.
 
 ## 0.4.0 — 2026-04-15
 

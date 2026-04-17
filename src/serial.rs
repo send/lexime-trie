@@ -52,12 +52,8 @@ impl HeaderV3 {
             return Err(TrieError::InvalidStructure);
         }
 
-        // Count-to-byte conversions: the declared counts come from an
-        // attacker-controlled buffer, so a multiplication overflowing
-        // `usize` here means the header is *internally* nonsensical
-        // (the buffer cannot describe that many nodes on this
-        // platform) rather than merely too short — surface it as a
-        // structural error.
+        // Declared counts are untrusted; an overflow here means the
+        // header claims a buffer too large to exist on this platform.
         let nodes_bytes = nodes_count
             .checked_mul(std::mem::size_of::<Node>())
             .ok_or(TrieError::InvalidStructure)?;
@@ -269,10 +265,6 @@ pub(crate) fn validate_cheap(
     child_offsets: &[u32],
     children_list: &[u32],
 ) -> Result<(), TrieError> {
-    // All three are structural invariants of the CSR representation;
-    // a buffer that reaches this point has already passed the length
-    // checks inside `HeaderV3::parse`, so a mismatch here is a
-    // corruption-of-shape rather than a truncation.
     if child_offsets.len() != nodes.len() + 1 {
         return Err(TrieError::InvalidStructure);
     }
@@ -496,12 +488,11 @@ mod tests {
 
     #[test]
     fn count_overflow_rejected() {
-        // Craft a header claiming nodes_count = u32::MAX. The resulting
-        // section size (N * 8) overflows usize on 32-bit platforms; on
-        // 64-bit the size is representable but wildly inconsistent with
-        // the buffer length. Either way the counts describe a buffer
-        // that cannot exist on this platform, so we surface it as a
-        // structural error rather than a mere truncation.
+        // Craft a header claiming `nodes_count = u32::MAX`. On 64-bit the
+        // size passes arithmetic but exceeds the buffer → `TruncatedData`.
+        // On 32-bit the multiplication overflows usize → `InvalidStructure`.
+        // Either is correct; the platform-dependent failure mode is an
+        // implementation detail.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.push(VERSION);
@@ -511,10 +502,6 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes()); // code_map_len
         bytes.extend_from_slice(&[0, 0, 0, 0]);
 
-        // On 64-bit the size passes arithmetic but exceeds the buffer →
-        // TruncatedData. On 32-bit the multiplication overflows usize →
-        // InvalidStructure. Accept either, since the platform-dependent
-        // failure mode is an implementation detail.
         let result = DoubleArray::<u8>::from_bytes(&bytes);
         assert!(
             matches!(

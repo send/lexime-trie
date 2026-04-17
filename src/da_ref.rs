@@ -68,8 +68,7 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// Returns [`TrieError::TruncatedData`] if the buffer ends before the
     /// declared header, sections, or code-map block are fully present.
     /// Returns [`TrieError::InvalidStructure`] if the buffer is long enough
-    /// but violates a v3 structural invariant (CSR length/endpoint mismatch,
-    /// `nodes_count < 2`, declared counts overflow `usize`).
+    /// but violates a v3 structural invariant.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, TrieError> {
         let header = HeaderV3::parse(bytes)?;
 
