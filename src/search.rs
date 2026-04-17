@@ -123,14 +123,13 @@ pub trait TrieSearch<L: Label> {
     /// `slice::get` on both the offset window and each child node
     /// lookup, so out-of-range entries are skipped silently.
     ///
-    /// One caveat: `predictive_search` traverses the CSR children
-    /// graph via an explicit stack without a visited set, so a
-    /// corruption pattern that happens to introduce a cycle can
-    /// make the iterator yield results indefinitely. The iterator
-    /// still does not panic and does not touch memory out of
-    /// bounds, but callers receiving buffers from untrusted sources
-    /// should either run `validate_strict` first or bound
-    /// consumption with `.take(N)`.
+    /// `predictive_search` carries an internal pop cap so iteration
+    /// always terminates, even when a corruption pattern introduces
+    /// a cycle in the CSR children graph. Results on such input may
+    /// be partial; callers receiving buffers from untrusted sources
+    /// should still run `validate_strict` up-front to reject
+    /// corruption cleanly rather than silently consume truncated
+    /// results.
     ///
     /// ```
     /// use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};
@@ -635,14 +634,17 @@ mod tests {
     // buffers whose `children_list` contains out-of-range node indices.
     // These tests pin the no-panic guarantee.
     //
-    // Note: termination is *not* guaranteed on pathological corruption
-    // — a non-monotonic offset range can happen to include children
-    // entries that form a cycle in the DFS graph, and the query paths
-    // have no visited set. The tests cap iteration with `take(N)` so a
-    // hypothetical cycle still produces a finite test run; the point
-    // is to prove the query does not panic and does not write OOB, not
-    // that it always terminates. Callers who receive untrusted buffers
-    // should run `validate_strict` before querying.
+    // Iteration is bounded: `PredictiveIter` carries an internal pop
+    // cap, so any cycle-producing corruption still yields a finite
+    // iterator. The `.take(N)` on the tests below is belt-and-suspenders
+    // — a regression in the cap would still produce a finite test run
+    // instead of a hang. See
+    // `predictive_search_pop_cap_bounds_cyclic_corruption` for a
+    // dedicated exercise of the cap (no `.take`).
+    //
+    // Callers handling untrusted buffers should still run
+    // `validate_strict` up-front to reject corruption cleanly rather
+    // than receive partial results.
 
     const MAX_CORRUPT_ITERS: usize = 256;
 
@@ -721,8 +723,11 @@ mod tests {
         nodes[2].set_leaf(42);
         nodes[2].set_check(1);
 
-        // Node 1 and node 2 both declare child window `[2, 1]`: each pop
-        // emits node 2 as a leaf match and re-pushes node 1.
+        // Node 1's child window `[2, 1]` self-loops via `c = 1`:
+        // popping node 1 emits node 2 as a leaf match (c=2) and
+        // re-pushes node 1 (c=1). Node 2 is never pushed/popped
+        // because it is a leaf, so the cycle is a self-loop on
+        // node 1 rather than a 1↔2 alternation.
         let child_offsets = vec![0u32, 0, 2, 4];
         let children_list = vec![2u32, 1, 2, 1];
 

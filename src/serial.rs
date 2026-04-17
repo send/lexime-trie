@@ -255,11 +255,10 @@ impl<L: Label> DoubleArray<L> {
 ///   slice and `.get()` + let-else on each child node lookup, so
 ///   out-of-range entries are skipped silently.
 ///
-/// `predictive_search` is the sole exception to termination: its DFS has
-/// no visited set, so a corruption pattern that happens to introduce a
-/// cycle in the CSR children graph can loop indefinitely. Callers with
-/// untrusted buffers should run [`validate_strict`] explicitly or bound
-/// iteration with `.take(N)`.
+/// `predictive_search` self-bounds iteration via an internal pop cap,
+/// so corruption cannot hang the iterator. Results on cyclic
+/// corruption may be partial; callers with untrusted buffers should
+/// run [`validate_strict`] up-front to reject corruption cleanly.
 pub(crate) fn validate_cheap(
     nodes: &[Node],
     child_offsets: &[u32],
@@ -284,9 +283,9 @@ pub(crate) fn validate_cheap(
 /// malformed buffers — useful when loading trie bytes from an untrusted
 /// source and the caller would rather error out than quietly yield wrong
 /// or partial results. Query paths are panic-safe on non-monotonic
-/// offsets, but `predictive_search` has no visited set and can fail to
-/// terminate on corruption that forms a cycle; callers handling
-/// untrusted input should validate first (or bound iteration).
+/// offsets and `predictive_search` self-bounds iteration via a pop
+/// cap — so corruption cannot hang the iterator — but results may be
+/// partial. Callers handling untrusted input should validate first.
 pub(crate) fn validate_strict(
     nodes: &[Node],
     child_offsets: &[u32],
