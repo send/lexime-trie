@@ -124,12 +124,10 @@ pub trait TrieSearch<L: Label> {
     /// lookup, so out-of-range entries are skipped silently.
     ///
     /// `predictive_search` carries an internal pop cap so iteration
-    /// always terminates, even when a corruption pattern introduces
-    /// a cycle in the CSR children graph. Results on such input may
-    /// be partial; callers receiving buffers from untrusted sources
-    /// should still run `validate_strict` up-front to reject
-    /// corruption cleanly rather than silently consume truncated
-    /// results.
+    /// always terminates, including on cyclic corruption. Results on
+    /// such input may be partial; callers with untrusted buffers
+    /// should still run `validate_strict` up-front to surface
+    /// corruption as an error instead of a silent partial yield.
     ///
     /// ```
     /// use lexime_trie::{DoubleArray, DoubleArrayRef, TrieSearch};
@@ -643,8 +641,8 @@ mod tests {
     // dedicated exercise of the cap (no `.take`).
     //
     // Callers handling untrusted buffers should still run
-    // `validate_strict` up-front to reject corruption cleanly rather
-    // than receive partial results.
+    // `validate_strict` up-front to surface corruption as an error
+    // instead of a partial yield.
 
     const MAX_CORRUPT_ITERS: usize = 256;
 
@@ -726,8 +724,7 @@ mod tests {
         // Node 1's child window `[2, 1]` self-loops via `c = 1`:
         // popping node 1 emits node 2 as a leaf match (c=2) and
         // re-pushes node 1 (c=1). Node 2 is never pushed/popped
-        // because it is a leaf, so the cycle is a self-loop on
-        // node 1 rather than a 1↔2 alternation.
+        // because it is a leaf.
         let child_offsets = vec![0u32, 0, 2, 4];
         let children_list = vec![2u32, 1, 2, 1];
 
