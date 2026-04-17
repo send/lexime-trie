@@ -256,9 +256,10 @@ impl<L: Label> DoubleArray<L> {
 ///   out-of-range entries are skipped silently.
 ///
 /// `predictive_search` self-bounds iteration via an internal pop cap,
-/// so corruption cannot hang the iterator. Results on cyclic
-/// corruption may be partial; callers with untrusted buffers should
-/// run [`validate_strict`] up-front to reject corruption cleanly.
+/// so corruption cannot hang the iterator — results on cyclic
+/// corruption may just be partial. Callers with untrusted buffers
+/// should run [`validate_strict`] up-front to surface corruption as
+/// an error.
 pub(crate) fn validate_cheap(
     nodes: &[Node],
     child_offsets: &[u32],
@@ -283,9 +284,10 @@ pub(crate) fn validate_cheap(
 /// malformed buffers — useful when loading trie bytes from an untrusted
 /// source and the caller would rather error out than quietly yield wrong
 /// or partial results. Query paths are panic-safe on non-monotonic
-/// offsets and `predictive_search` self-bounds iteration via a pop
-/// cap — so corruption cannot hang the iterator — but results may be
-/// partial. Callers handling untrusted input should validate first.
+/// offsets; `predictive_search` additionally self-bounds iteration
+/// via a pop cap, so corruption cannot hang the iterator (though
+/// results may be partial). Callers handling untrusted input should
+/// validate first.
 pub(crate) fn validate_strict(
     nodes: &[Node],
     child_offsets: &[u32],
