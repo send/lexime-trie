@@ -93,10 +93,12 @@ impl<'a, L: Label> TrieView<'a, L> {
             // None label = root entry; key_buf is already set to the prefix.
             stack.push((node, prefix.len() as u32, None));
         }
+        let pops_remaining = self.nodes.len();
         PredictiveIter {
             view: self,
             stack,
             key_buf,
+            pops_remaining,
         }
     }
 
@@ -113,7 +115,8 @@ impl<'a, L: Label> TrieView<'a, L> {
             }
         };
 
-        let node = self.nodes[node_idx as usize];
+        // SAFETY: traverse guarantees node_idx is a valid index.
+        let node = unsafe { *self.nodes.get_unchecked(node_idx as usize) };
 
         // Fast path: `has_leaf` means the terminal child is at
         // `base(p) XOR 0 == base(p)`. We don't need to touch `children_list`
@@ -122,7 +125,8 @@ impl<'a, L: Label> TrieView<'a, L> {
         if node.has_leaf() {
             let terminal_idx = node.base() as usize;
             if terminal_idx < self.nodes.len() {
-                let terminal = self.nodes[terminal_idx];
+                // SAFETY: terminal_idx bounds-checked above.
+                let terminal = unsafe { *self.nodes.get_unchecked(terminal_idx) };
                 if terminal.check() == node_idx && terminal.is_leaf() {
                     let n = child_range_width(self.child_offsets, node_idx);
                     return ProbeResult {
@@ -240,6 +244,11 @@ pub(crate) struct PredictiveIter<'a, L: Label> {
     /// Shared key buffer. Grows/truncates as DFS proceeds, avoiding per-node
     /// Vec<L> clones. Only cloned when emitting a SearchMatch.
     key_buf: Vec<L>,
+    /// Hard cap on stack pops so a corrupted CSR that forms a DFS cycle
+    /// still yields a terminating iterator. Initialised to `nodes.len()`,
+    /// an upper bound on pops in any valid trie, so the cap never
+    /// constrains well-formed traversals.
+    pops_remaining: usize,
 }
 
 impl<L: Label> Iterator for PredictiveIter<'_, L> {
@@ -247,6 +256,12 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
 
     fn next(&mut self) -> Option<SearchMatch<L>> {
         while let Some((node_idx, parent_depth, label)) = self.stack.pop() {
+            if self.pops_remaining == 0 {
+                // Clear so subsequent `next()` calls are cheap no-ops.
+                self.stack.clear();
+                return None;
+            }
+            self.pops_remaining -= 1;
             // Restore key_buf to the parent's depth, then append this node's label.
             self.key_buf.truncate(parent_depth as usize);
             if let Some(l) = label {

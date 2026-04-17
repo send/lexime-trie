@@ -62,10 +62,13 @@ impl<'a, L: Label> DoubleArrayRef<'a, L> {
     /// # Errors
     ///
     /// Returns [`TrieError::InvalidMagic`] if the magic bytes don't match.
-    /// Returns [`TrieError::InvalidVersion`] if the version is not v3.
+    /// Returns [`TrieError::InvalidVersion`] if the version is not v3 (the
+    /// observed version byte is attached to the variant).
     /// Returns [`TrieError::MisalignedData`] if the buffer is not properly aligned.
-    /// Returns [`TrieError::TruncatedData`] if the buffer is too short or the
-    /// CSR structural invariants are violated.
+    /// Returns [`TrieError::TruncatedData`] if the buffer ends before the
+    /// declared header, sections, or code-map block are fully present.
+    /// Returns [`TrieError::InvalidStructure`] if the buffer is long enough
+    /// but violates a v3 structural invariant.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, TrieError> {
         let header = HeaderV3::parse(bytes)?;
 
@@ -366,7 +369,7 @@ mod tests {
         bytes[4] = 99; // bogus version
         assert!(matches!(
             DoubleArrayRef::<u8>::from_bytes(&bytes),
-            Err(TrieError::InvalidVersion)
+            Err(TrieError::InvalidVersion(99))
         ));
     }
 

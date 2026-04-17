@@ -40,7 +40,7 @@ impl HeaderV3 {
             return Err(TrieError::InvalidMagic);
         }
         if bytes[4] != VERSION {
-            return Err(TrieError::InvalidVersion);
+            return Err(TrieError::InvalidVersion(bytes[4]));
         }
 
         let nodes_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
@@ -49,26 +49,30 @@ impl HeaderV3 {
 
         if nodes_count < 2 {
             // nodes[0] = sentinel, nodes[1] = root are both required.
-            return Err(TrieError::TruncatedData);
+            return Err(TrieError::InvalidStructure);
         }
 
+        // Declared counts are untrusted; an overflow here means the
+        // header claims a buffer too large to exist on this platform.
         let nodes_bytes = nodes_count
             .checked_mul(std::mem::size_of::<Node>())
-            .ok_or(TrieError::TruncatedData)?;
-        let child_offsets_count = nodes_count.checked_add(1).ok_or(TrieError::TruncatedData)?;
+            .ok_or(TrieError::InvalidStructure)?;
+        let child_offsets_count = nodes_count
+            .checked_add(1)
+            .ok_or(TrieError::InvalidStructure)?;
         let child_offsets_bytes = child_offsets_count
             .checked_mul(4)
-            .ok_or(TrieError::TruncatedData)?;
+            .ok_or(TrieError::InvalidStructure)?;
         let children_list_bytes = children_count
             .checked_mul(4)
-            .ok_or(TrieError::TruncatedData)?;
+            .ok_or(TrieError::InvalidStructure)?;
 
         let total_size = HEADER_SIZE
             .checked_add(nodes_bytes)
             .and_then(|s| s.checked_add(child_offsets_bytes))
             .and_then(|s| s.checked_add(children_list_bytes))
             .and_then(|s| s.checked_add(code_map_len))
-            .ok_or(TrieError::TruncatedData)?;
+            .ok_or(TrieError::InvalidStructure)?;
         if bytes.len() < total_size {
             return Err(TrieError::TruncatedData);
         }
@@ -251,24 +255,23 @@ impl<L: Label> DoubleArray<L> {
 ///   slice and `.get()` + let-else on each child node lookup, so
 ///   out-of-range entries are skipped silently.
 ///
-/// `predictive_search` is the sole exception to termination: its DFS has
-/// no visited set, so a corruption pattern that happens to introduce a
-/// cycle in the CSR children graph can loop indefinitely. Callers with
-/// untrusted buffers should run [`validate_strict`] explicitly or bound
-/// iteration with `.take(N)`.
+/// `predictive_search` self-bounds iteration via an internal pop cap,
+/// so corruption cannot hang the iterator. Results on cyclic
+/// corruption may be partial; callers with untrusted buffers should
+/// run [`validate_strict`] up-front to reject corruption cleanly.
 pub(crate) fn validate_cheap(
     nodes: &[Node],
     child_offsets: &[u32],
     children_list: &[u32],
 ) -> Result<(), TrieError> {
     if child_offsets.len() != nodes.len() + 1 {
-        return Err(TrieError::TruncatedData);
+        return Err(TrieError::InvalidStructure);
     }
     if child_offsets.first() != Some(&0) {
-        return Err(TrieError::TruncatedData);
+        return Err(TrieError::InvalidStructure);
     }
     if child_offsets.last() != Some(&(children_list.len() as u32)) {
-        return Err(TrieError::TruncatedData);
+        return Err(TrieError::InvalidStructure);
     }
     Ok(())
 }
@@ -280,9 +283,9 @@ pub(crate) fn validate_cheap(
 /// malformed buffers — useful when loading trie bytes from an untrusted
 /// source and the caller would rather error out than quietly yield wrong
 /// or partial results. Query paths are panic-safe on non-monotonic
-/// offsets, but `predictive_search` has no visited set and can fail to
-/// terminate on corruption that forms a cycle; callers handling
-/// untrusted input should validate first (or bound iteration).
+/// offsets and `predictive_search` self-bounds iteration via a pop
+/// cap — so corruption cannot hang the iterator — but results may be
+/// partial. Callers handling untrusted input should validate first.
 pub(crate) fn validate_strict(
     nodes: &[Node],
     child_offsets: &[u32],
@@ -291,7 +294,7 @@ pub(crate) fn validate_strict(
     validate_cheap(nodes, child_offsets, children_list)?;
     for w in child_offsets.windows(2) {
         if w[0] > w[1] {
-            return Err(TrieError::TruncatedData);
+            return Err(TrieError::InvalidStructure);
         }
     }
     Ok(())
@@ -392,7 +395,7 @@ mod tests {
         bytes[4] = 99;
         assert!(matches!(
             DoubleArray::<u8>::from_bytes(&bytes),
-            Err(TrieError::InvalidVersion)
+            Err(TrieError::InvalidVersion(99))
         ));
     }
 
@@ -465,28 +468,30 @@ mod tests {
 
         assert!(matches!(
             DoubleArray::<u8>::from_bytes(&bytes),
-            Err(TrieError::TruncatedData)
+            Err(TrieError::InvalidStructure)
         ));
     }
 
     #[test]
     fn v2_buffer_rejected_as_invalid_version() {
-        // v2 had VERSION=2; writing that into a v3 buffer must fail with InvalidVersion.
+        // v2 had VERSION=2; writing that into a v3 buffer must fail with
+        // InvalidVersion carrying the observed byte.
         let da = DoubleArray::<u8>::build(&[b"a"]);
         let mut bytes = da.as_bytes();
         bytes[4] = 2;
         assert!(matches!(
             DoubleArray::<u8>::from_bytes(&bytes),
-            Err(TrieError::InvalidVersion)
+            Err(TrieError::InvalidVersion(2))
         ));
     }
 
     #[test]
     fn count_overflow_rejected() {
-        // Craft a header claiming nodes_count = u32::MAX. The resulting
-        // section size (N * 8) overflows usize on 32-bit platforms and
-        // exceeds the buffer on 64-bit. Either way we must return
-        // TruncatedData, not UB.
+        // Craft a header claiming `nodes_count = u32::MAX`. On 64-bit the
+        // size passes arithmetic but exceeds the buffer → `TruncatedData`.
+        // On 32-bit the multiplication overflows usize → `InvalidStructure`.
+        // Either is correct; the platform-dependent failure mode is an
+        // implementation detail.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.push(VERSION);
@@ -496,10 +501,14 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes()); // code_map_len
         bytes.extend_from_slice(&[0, 0, 0, 0]);
 
-        assert!(matches!(
-            DoubleArray::<u8>::from_bytes(&bytes),
-            Err(TrieError::TruncatedData)
-        ));
+        let result = DoubleArray::<u8>::from_bytes(&bytes);
+        assert!(
+            matches!(
+                result,
+                Err(TrieError::TruncatedData) | Err(TrieError::InvalidStructure)
+            ),
+            "unexpected result: {result:?}"
+        );
     }
 
     #[test]
@@ -513,7 +522,7 @@ mod tests {
         let children_list: Vec<u32> = vec![0u32; 0];
         assert!(matches!(
             validate_strict(&nodes, &child_offsets, &children_list),
-            Err(TrieError::TruncatedData)
+            Err(TrieError::InvalidStructure)
         ));
     }
 
@@ -528,7 +537,7 @@ mod tests {
         let children_list: Vec<u32> = vec![];
         assert!(matches!(
             validate_cheap(&nodes, &child_offsets, &children_list),
-            Err(TrieError::TruncatedData)
+            Err(TrieError::InvalidStructure)
         ));
     }
 
@@ -547,7 +556,7 @@ mod tests {
 
         assert!(matches!(
             DoubleArray::<u8>::from_bytes(&bytes),
-            Err(TrieError::TruncatedData)
+            Err(TrieError::InvalidStructure)
         ));
     }
 
