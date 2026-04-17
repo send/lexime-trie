@@ -2,6 +2,66 @@
 
 All notable changes to this crate are documented in this file.
 
+## 0.5.0 — 2026-04-17
+
+Breaking release that refines `TrieError` so load failures carry
+actionable diagnostics and so future variants can be added
+non-breakingly.
+
+### Breaking
+
+- **`TrieError` is now `#[non_exhaustive]`.** Callers pattern-matching
+  on its variants must include a catch-all arm (`_ => ...`). This
+  allows future diagnostic refinements without another breaking
+  release.
+- **`TrieError::InvalidVersion` now carries a `u8` payload.** The
+  value is the actual version byte observed in the buffer, preserved
+  so wrappers can forward it rather than hardcoding a placeholder:
+  ```rust
+  // Before
+  TrieError::InvalidVersion
+  // After
+  TrieError::InvalidVersion(99)
+  ```
+  This fixes the information loss path in downstream wrappers like
+  lexime's `DictError::UnsupportedVersion(_)`.
+- **`TrieError::InvalidStructure` is a new variant.** Previously the
+  loader conflated two distinct failure modes into `TruncatedData`:
+  - actual buffer truncation (header/section/code-map cut off), and
+  - structural corruption on a long-enough buffer (`nodes_count < 2`,
+    CSR length/endpoint mismatch, non-monotonic `child_offsets`,
+    declared counts that overflow `usize`).
+  These are now split: `TruncatedData` is emitted only when the
+  buffer ends early; `InvalidStructure` is emitted when the shape is
+  wrong. Remediation differs — truncation suggests a partial
+  download, structural corruption suggests regenerating the trie.
+
+### Migration
+
+Callers that matched on `TrieError` exhaustively should:
+
+1. Add a wildcard arm for `#[non_exhaustive]`.
+2. Replace `TrieError::InvalidVersion` with `TrieError::InvalidVersion(_)`
+   (or bind the version byte if reporting it).
+3. If distinguishing corruption from truncation is useful, add a
+   `TrieError::InvalidStructure` arm; otherwise a fallback arm
+   (or widening to `TruncatedData | InvalidStructure`) suffices.
+
+The change is purely additive on the data-layout side — no v3 binary
+format changes. Existing `.lxtr` buffers load unchanged.
+
+### Internal
+
+- `predictive_search`'s iterator now carries a hard pop cap equal to
+  `nodes.len()` so it always terminates, even when a corrupted
+  `children_list` + `child_offsets` combination forms a DFS cycle.
+  A valid trie pops at most `nodes.len()` times, so the cap never
+  constrains well-formed traversals. `validate_strict` still catches
+  the underlying corruption up-front when run; this cap exists for
+  callers that skip validation.
+- `TrieView::probe` reuses the `get_unchecked` + explicit
+  bounds-check pattern from the other hot paths.
+
 ## 0.4.0 — 2026-04-15
 
 Breaking release that tightens the public surface and adds an owning

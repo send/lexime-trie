@@ -68,26 +68,45 @@ pub use search::{PrefixMatch, ProbeResult, SearchMatch, TrieSearch};
 use code_map::CodeMapper;
 use node::Node;
 
-/// Errors that can occur during trie operations.
+/// Errors that can occur when loading a serialized trie.
+///
+/// Marked `#[non_exhaustive]` so future failure modes can be
+/// introduced without a breaking change — callers matching on
+/// specific variants should include a catch-all arm.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrieError {
-    /// The binary data has an invalid magic number.
+    /// The first four bytes do not match the `LXTR` magic identifier.
     InvalidMagic,
-    /// The binary data has an unsupported version.
-    InvalidVersion,
-    /// The binary data is truncated or corrupted.
+    /// The buffer declares a version this build does not support. The
+    /// payload is the actual version byte observed, preserved so the
+    /// caller can report it in diagnostics.
+    InvalidVersion(u8),
+    /// The buffer ends before the header, a declared section, or the
+    /// code-map block is fully present. Indicates the bytes are
+    /// incomplete; the remedy is to re-obtain a complete buffer.
     TruncatedData,
-    /// The byte buffer is not properly aligned for zero-copy access.
+    /// The buffer pointer does not meet the 4-byte alignment required
+    /// for zero-copy access via [`DoubleArrayRef`] / [`DoubleArrayBacked`].
     MisalignedData,
+    /// The buffer is long enough but violates a v3 structural invariant
+    /// (`nodes_count < 2`, declared section counts overflow the
+    /// platform's address space, CSR `child_offsets` length or endpoint
+    /// mismatch, or — under [`TrieSearch::validate_strict`] — a
+    /// non-monotonic child-offset sequence). Indicates the bytes are
+    /// corrupt rather than truncated; the remedy is to regenerate the
+    /// trie rather than re-fetch the buffer.
+    InvalidStructure,
 }
 
 impl std::fmt::Display for TrieError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TrieError::InvalidMagic => write!(f, "invalid magic number"),
-            TrieError::InvalidVersion => write!(f, "unsupported version"),
-            TrieError::TruncatedData => write!(f, "truncated or corrupted data"),
+            TrieError::InvalidVersion(v) => write!(f, "unsupported version: {v}"),
+            TrieError::TruncatedData => write!(f, "truncated data"),
             TrieError::MisalignedData => write!(f, "misaligned data for zero-copy access"),
+            TrieError::InvalidStructure => write!(f, "invalid trie structure"),
         }
     }
 }
