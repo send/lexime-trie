@@ -703,4 +703,51 @@ mod tests {
             .take(MAX_CORRUPT_ITERS)
             .count();
     }
+
+    #[test]
+    fn predictive_search_pop_cap_bounds_cyclic_corruption() {
+        // Hand-build a tiny corrupt trie whose `children_list` +
+        // `child_offsets` steer the DFS into a cycle: both non-sentinel
+        // nodes list each other as children, so popping either pushes
+        // the other back onto the stack forever. Without the pop cap
+        // on `PredictiveIter` this iteration would not terminate. The
+        // `count()` below therefore also functions as a (deliberate)
+        // hang detector — regressions on the cap show up as a test
+        // timeout.
+        use crate::code_map::CodeMapper;
+        use crate::Node;
+
+        // Alphabet size 3 (2 labels + terminal) so codes 1 and 2 both
+        // round-trip through `CodeMapper::reverse::<u8>`.
+        let code_map = CodeMapper::build(&[b"ab".as_ref()]);
+
+        // 3 nodes: [sentinel, root, leaf].
+        let mut nodes = vec![Node::default(); 3];
+        // root.base() = 0, root.check() = 0 (sentinel parent).
+        // leaf marked as a terminal child of root (check = 1) so each
+        // pop emits a `SearchMatch`, making the cap visible in `count()`.
+        nodes[2].set_leaf(42);
+        nodes[2].set_check(1);
+
+        // Both node 1 and node 2 declare child window `[2, 1]`. With
+        // `base(n) == 0`, `base ^ 1 == 1` and `base ^ 2 == 2` both
+        // reverse-decode to valid labels, so the extension push for
+        // `c = 1` is never skipped — the cycle is real, not reliant
+        // on reverse-lookup luck.
+        let child_offsets = vec![0u32, 0, 2, 4];
+        let children_list = vec![2u32, 1, 2, 1];
+
+        let corrupt = DoubleArray::<u8>::new(nodes, child_offsets, children_list, code_map);
+
+        // Each pop emits one match (for child `c = 2`, which is a leaf)
+        // and pushes node 1 back onto the stack (for child `c = 1`).
+        // In a valid trie with N nodes the iterator would stop by
+        // itself; here the cap enforces that bound.
+        let cap = corrupt.node_slot_count();
+        let count = corrupt.predictive_search(b"").count();
+        assert!(
+            count <= cap,
+            "pop cap did not bound iteration: got {count}, cap {cap}"
+        );
+    }
 }

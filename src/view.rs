@@ -93,10 +93,16 @@ impl<'a, L: Label> TrieView<'a, L> {
             // None label = root entry; key_buf is already set to the prefix.
             stack.push((node, prefix.len() as u32, None));
         }
+        // In a valid trie the DFS pops each descendant of `prefix` at
+        // most once, so `nodes.len()` is a safe upper bound that never
+        // constrains a well-formed traversal. See `pops_remaining` on
+        // `PredictiveIter` for the corruption case this defends against.
+        let pops_remaining = self.nodes.len();
         PredictiveIter {
             view: self,
             stack,
             key_buf,
+            pops_remaining,
         }
     }
 
@@ -113,7 +119,8 @@ impl<'a, L: Label> TrieView<'a, L> {
             }
         };
 
-        let node = self.nodes[node_idx as usize];
+        // SAFETY: traverse guarantees node_idx is a valid index.
+        let node = unsafe { *self.nodes.get_unchecked(node_idx as usize) };
 
         // Fast path: `has_leaf` means the terminal child is at
         // `base(p) XOR 0 == base(p)`. We don't need to touch `children_list`
@@ -122,7 +129,8 @@ impl<'a, L: Label> TrieView<'a, L> {
         if node.has_leaf() {
             let terminal_idx = node.base() as usize;
             if terminal_idx < self.nodes.len() {
-                let terminal = self.nodes[terminal_idx];
+                // SAFETY: terminal_idx bounds-checked above.
+                let terminal = unsafe { *self.nodes.get_unchecked(terminal_idx) };
                 if terminal.check() == node_idx && terminal.is_leaf() {
                     let n = child_range_width(self.child_offsets, node_idx);
                     return ProbeResult {
@@ -240,6 +248,19 @@ pub(crate) struct PredictiveIter<'a, L: Label> {
     /// Shared key buffer. Grows/truncates as DFS proceeds, avoiding per-node
     /// Vec<L> clones. Only cloned when emitting a SearchMatch.
     key_buf: Vec<L>,
+    /// Hard cap on the total number of stack pops this iterator is
+    /// willing to perform, used as a termination safety net for
+    /// corrupted buffers. A non-monotonic `child_offsets` or poisoned
+    /// `children_list` entry can steer the DFS into a cycle, in which
+    /// case the corruption-tolerant bounds checks elsewhere on the hot
+    /// path keep us memory-safe but do not by themselves bound
+    /// iteration. Initialised to `nodes.len()` in `predictive_search`,
+    /// which is a valid upper bound on descendants for any well-formed
+    /// trie and therefore never curtails correct traversals.
+    /// `validate_strict` catches the underlying corruption when it is
+    /// run; this cap exists so callers that skip it still get a
+    /// terminating iterator.
+    pops_remaining: usize,
 }
 
 impl<L: Label> Iterator for PredictiveIter<'_, L> {
@@ -247,6 +268,15 @@ impl<L: Label> Iterator for PredictiveIter<'_, L> {
 
     fn next(&mut self) -> Option<SearchMatch<L>> {
         while let Some((node_idx, parent_depth, label)) = self.stack.pop() {
+            if self.pops_remaining == 0 {
+                // Pop budget exhausted — a valid trie would have emptied
+                // the stack by now, so this is a corrupted buffer. Clear
+                // the residual stack so subsequent `next()` calls are
+                // cheap no-ops rather than re-checking this branch.
+                self.stack.clear();
+                return None;
+            }
+            self.pops_remaining -= 1;
             // Restore key_buf to the parent's depth, then append this node's label.
             self.key_buf.truncate(parent_depth as usize);
             if let Some(l) = label {
