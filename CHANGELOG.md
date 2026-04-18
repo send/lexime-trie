@@ -2,6 +2,22 @@
 
 All notable changes to this crate are documented in this file.
 
+## 0.5.1 — 2026-04-18
+
+Documentation-only patch release. No runtime code changes, no API
+surface changes. `.lxtr` buffers and all public types behave
+identically to 0.5.0.
+
+### Documentation
+
+- Rewrote the predictive-search termination notes on
+  `TrieSearch::validate_strict`, the corruption-robustness test
+  prologue, and the `validate_cheap` / `validate_strict` rustdocs so
+  they describe the 0.5 guarantee (pop cap → unconditional
+  termination) rather than the pre-0.5 behaviour.
+- Tightened hedging language at four sites and fixed a double-em-dash
+  interruption in the `validate_strict` rustdoc.
+
 ## 0.5.0 — 2026-04-17
 
 Breaking release that refines `TrieError` so load failures carry
